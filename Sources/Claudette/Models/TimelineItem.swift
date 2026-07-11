@@ -1,0 +1,256 @@
+import Foundation
+
+struct TimelineItem: Identifiable, Equatable {
+    let id: UUID
+    var kind: Kind
+    var createdAt: Date
+
+    init(id: UUID = UUID(), kind: Kind, createdAt: Date = Date()) {
+        self.id = id
+        self.kind = kind
+        self.createdAt = createdAt
+    }
+
+    enum Kind: Equatable {
+        case userText(String)
+        case assistantText(text: String, isStreaming: Bool)
+        case thinking(String)
+        case action(ActionEvent)
+        case system(String)
+    }
+}
+
+struct ActionEvent: Identifiable, Equatable {
+    let id: String
+    var name: String
+    var inputJSON: String
+    var startedAt: Date
+    var status: Status
+    var result: String
+    var isError: Bool
+
+    // Extracted fields for skimmable display
+    var filePath: String?
+    var command: String?
+    var pattern: String?
+    var url: String?
+    var oldString: String?
+    var newString: String?
+    var edits: [EditPair]?
+    var description: String?
+    var content: String?
+    var summary: String?
+    var todos: [TodoEntry]?
+    var questions: [InteractiveQuestion]?
+
+    enum Status: String {
+        case running, success, error
+    }
+
+    var category: ActionCategory {
+        ActionCategory.of(toolName: name)
+    }
+
+    var humanTitle: String {
+        switch category {
+        case .edit, .multiEdit:
+            if let file = shortFile { return "Editing \(file)" }
+            return "Editing file"
+        case .write:
+            if let file = shortFile { return "Writing \(file)" }
+            return "Writing file"
+        case .read:
+            if let file = shortFile { return "Reading \(file)" }
+            return "Reading file"
+        case .bash:
+            return command.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? "Running command"
+        case .search:
+            if let p = pattern, !p.isEmpty { return "Searching for \(p)" }
+            return "Searching"
+        case .glob:
+            if let p = pattern, !p.isEmpty { return "Finding files: \(p)" }
+            return "Finding files"
+        case .web:
+            if let u = url { return "Fetching \(hostname(u))" }
+            return "Fetching URL"
+        case .todo:
+            return "Updating plan"
+        case .task:
+            return description ?? "Running sub-agent"
+        case .ask:
+            if let q = questions?.first?.question, !q.isEmpty { return q }
+            return "Asking a question"
+        case .other:
+            return name
+        }
+    }
+
+    /// Short one-line preview shown next to the title on the compact card.
+    var summaryChip: String? {
+        switch category {
+        case .edit, .multiEdit:
+            let stats = diffStats
+            if stats.additions == 0 && stats.deletions == 0 { return nil }
+            return "+\(stats.additions) −\(stats.deletions)"
+        case .write:
+            let lines = (newString ?? content ?? "").split(separator: "\n").count
+            return lines > 0 ? "\(lines) line\(lines == 1 ? "" : "s")" : nil
+        case .read:
+            if !result.isEmpty && status == .success {
+                let lines = result.split(separator: "\n").count
+                if lines > 0 { return "\(lines) line\(lines == 1 ? "" : "s")" }
+            }
+            return nil
+        case .search, .glob:
+            if status == .success && !result.isEmpty {
+                let count = result.split(separator: "\n").count
+                return "\(count) match\(count == 1 ? "" : "es")"
+            }
+            return nil
+        case .bash:
+            return exitCodeSummary
+        case .todo:
+            if let t = todos, !t.isEmpty {
+                let done = t.filter { $0.status == "completed" }.count
+                return "\(done)/\(t.count)"
+            }
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    var diffStats: (additions: Int, deletions: Int) {
+        if let edits = edits, !edits.isEmpty {
+            return edits.reduce((0, 0)) { acc, pair in
+                let s = lineDiffStats(old: pair.old, new: pair.new)
+                return (acc.0 + s.additions, acc.1 + s.deletions)
+            }
+        }
+        if let old = oldString, let new = newString {
+            return lineDiffStats(old: old, new: new)
+        }
+        if let content = content ?? newString {
+            let lines = content.split(separator: "\n").count
+            return (lines, 0)
+        }
+        return (0, 0)
+    }
+
+    private var exitCodeSummary: String? {
+        // Bash results often include an exit code line at the end; keep it simple
+        if isError { return "failed" }
+        if status == .success { return nil }
+        return nil
+    }
+
+    var shortFile: String? {
+        guard let filePath else { return nil }
+        return (filePath as NSString).lastPathComponent
+    }
+
+    private func hostname(_ url: String) -> String {
+        URL(string: url)?.host ?? url
+    }
+}
+
+struct EditPair: Equatable {
+    var old: String
+    var new: String
+}
+
+struct TodoEntry: Equatable {
+    var content: String
+    var status: String   // "pending", "in_progress", "completed"
+    var priority: String?
+}
+
+struct InteractiveQuestion: Equatable {
+    var question: String
+    var header: String?
+    var multiSelect: Bool
+    var options: [InteractiveOption]
+}
+
+struct InteractiveOption: Equatable {
+    var label: String
+    var description: String?
+}
+
+enum ActionCategory {
+    case read, edit, multiEdit, write, bash, search, glob, web, todo, task, ask, other
+
+    static func of(toolName: String) -> ActionCategory {
+        switch toolName.lowercased() {
+        case "read": return .read
+        case "edit": return .edit
+        case "multiedit": return .multiEdit
+        case "write": return .write
+        case "bash", "shell": return .bash
+        case "grep", "search": return .search
+        case "glob": return .glob
+        case "webfetch", "webrequest", "webread": return .web
+        case "todowrite", "todoread": return .todo
+        case "task", "taskcreate", "taskupdate", "agent": return .task
+        case "askuserquestion", "userquestion", "ask": return .ask
+        default: return .other
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .read: return "doc.text"
+        case .edit, .multiEdit: return "pencil"
+        case .write: return "square.and.pencil"
+        case .bash: return "terminal"
+        case .search: return "magnifyingglass"
+        case .glob: return "line.3.horizontal.decrease.circle"
+        case .web: return "globe"
+        case .todo: return "checklist"
+        case .task: return "sparkles"
+        case .ask: return "hand.raised"
+        case .other: return "wrench.and.screwdriver"
+        }
+    }
+
+    /// A soft tint used for icon backgrounds. Kept muted so the timeline stays calm.
+    var tintHex: UInt32 {
+        switch self {
+        case .read: return 0x6A8AAF        // blue
+        case .edit, .multiEdit: return 0xC96442  // accent orange
+        case .write: return 0x8A6AAF       // purple
+        case .bash: return 0x5A5854        // graphite
+        case .search: return 0x8A7B4E      // muted gold
+        case .glob: return 0x8A7B4E
+        case .web: return 0x4E8A7A         // teal
+        case .todo: return 0x7A8A4E        // olive
+        case .task: return 0xC96442
+        case .ask: return 0x8A6AAF         // purple
+        case .other: return 0x6C6459
+        }
+    }
+}
+
+// MARK: - Simple line-diff stats
+
+func lineDiffStats(old: String, new: String) -> (additions: Int, deletions: Int) {
+    let oldLines = old.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    let newLines = new.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    // Straight-line diff: a line is "removed" if not in new, "added" if not in old.
+    // For an accurate count without LCS, we use a multiset delta.
+    var oldCounts: [String: Int] = [:]
+    var newCounts: [String: Int] = [:]
+    for l in oldLines { oldCounts[l, default: 0] += 1 }
+    for l in newLines { newCounts[l, default: 0] += 1 }
+    var adds = 0
+    var dels = 0
+    for (line, count) in newCounts {
+        let inOld = oldCounts[line] ?? 0
+        if count > inOld { adds += count - inOld }
+    }
+    for (line, count) in oldCounts {
+        let inNew = newCounts[line] ?? 0
+        if count > inNew { dels += count - inNew }
+    }
+    return (adds, dels)
+}

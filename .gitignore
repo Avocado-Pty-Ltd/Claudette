@@ -1,0 +1,26 @@
+# Build output
+.build/
+.swiftpm/
+build/
+Package.resolved
+DerivedData/
+
+# Xcode
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/
+*.mobileprovision
+
+# Secrets — never commit
+.env
+.env.*
+secrets/
+*.pem
+*.p12
+
+# Local Claude Code state (per-user session cache)
+.claude/
+
+# macOS
+.DS_Store
