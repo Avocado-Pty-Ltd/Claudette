@@ -29,6 +29,20 @@ final class ClaudeChatSession: ObservableObject {
     /// narration handles TTS. This exists so the crawl can show Claude's live planning
     /// prose ("I'll check the auth middleware first…") as it streams in.
     @Published private(set) var streamingChunk: String?
+    /// Rolling buffer of raw Claude Code stdout — the JSON stream events themselves,
+    /// unparsed. Displayed inside the orb sphere as a refracted, aberrated ticker so
+    /// you can see the actual CLI thinking scroll through. Capped at ~8 KB so it
+    /// never grows without bound.
+    @Published private(set) var rawLog: String = ""
+    /// In-flight and recently-finished sub-agents from the Task tool. Rendered as
+    /// small spheres orbiting the main orb, then dissolving after completion.
+    @Published private(set) var subagents: [SubagentState] = []
+    /// The most recent set of todos from the TodoWrite tool. Rendered as a floating
+    /// checklist panel so the user can see Claude's live plan.
+    @Published private(set) var todos: [TodoEntry] = []
+    /// The most recent Bash / long-running tool for the monitor panel. Shows the
+    /// command + first lines of output when it exists.
+    @Published private(set) var latestMonitor: ActionEvent?
     @Published var cwdDisplay: String = ""
     @Published var permissionMode: PermissionMode
 
@@ -98,6 +112,11 @@ final class ClaudeChatSession: ObservableObject {
         if process == nil {
             startProcess(initialPrompt: prompt)
         } else {
+            // Second and subsequent turns on an existing process: startProcess isn't
+            // called again, so isRunning was never flipped back on. Do it here so the
+            // orb reflects "working" immediately, not only after the first stream
+            // event lands.
+            isRunning = true
             sendJSONLine([
                 "type": "user",
                 "message": [
@@ -293,6 +312,10 @@ final class ClaudeChatSession: ObservableObject {
         liveNarration = nil
         streamingChunk = nil
         assistantStreamCursor = 0
+        rawLog = ""
+        subagents.removeAll()
+        todos.removeAll()
+        latestMonitor = nil
         interpretationTimeoutTask?.cancel()
         interpreter.cancel()
     }
@@ -430,6 +453,16 @@ final class ClaudeChatSession: ObservableObject {
 
     private func appendStdoutData(_ data: Data) {
         buffer.append(data)
+        // Mirror raw stdout into rawLog so the orb sphere can render it as a
+        // refracted ticker. Trim from the head so the total stays bounded — anything
+        // older than ~8 KB is far off-screen inside the sphere anyway.
+        if let str = String(data: data, encoding: .utf8) {
+            rawLog += str
+            let cap = 8000
+            if rawLog.count > cap {
+                rawLog = String(rawLog.dropFirst(rawLog.count - cap))
+            }
+        }
         while let newlineIdx = buffer.firstIndex(of: 0x0A) {
             let lineData = buffer[..<newlineIdx]
             buffer.removeSubrange(...newlineIdx)
@@ -450,10 +483,17 @@ final class ClaudeChatSession: ObservableObject {
         case "system":
             handleSystemEvent(obj)
         case "assistant":
+            // Any assistant activity means Claude is working. This flip is defensive:
+            // between turns in a long-running process, isRunning would otherwise stay
+            // false until a fresh startProcess, so the orb showed "idle" while Claude
+            // was actually mid-turn.
+            isRunning = true
             handleAssistantEvent(obj)
         case "user":
+            isRunning = true
             handleUserEcho(obj)
         case "stream_event":
+            isRunning = true
             handlePartialEvent(obj)
         case "result":
             handleResultEvent(obj)
@@ -512,6 +552,29 @@ final class ClaudeChatSession: ObservableObject {
                 if let phrase = Self.livePhrase(for: event) {
                     liveNarration = phrase
                 }
+                // Sidecar visualisations for specific tool categories.
+                switch event.category {
+                case .task:
+                    // A subagent has been spawned. Add it to the field so the UI can
+                    // pop a small sphere out of the main orb. hueSeed makes each
+                    // subagent visually distinct (deterministic by id).
+                    subagents.append(SubagentState(
+                        id: id,
+                        label: event.description ?? "sub-agent",
+                        startedAt: Date(),
+                        hueSeed: abs(id.hashValue) % 5,
+                        status: .running,
+                        completedAt: nil
+                    ))
+                case .todo:
+                    // A new plan snapshot — mirror it into the session's todos so
+                    // the TodoPanel can render the checklist live.
+                    if let ts = event.todos { todos = ts }
+                case .bash:
+                    latestMonitor = event
+                default:
+                    break
+                }
             default:
                 break
             }
@@ -550,6 +613,18 @@ final class ClaudeChatSession: ObservableObject {
         if let phrase = Self.resultPhrase(for: event) {
             liveNarration = phrase
         }
+        // Mark subagent completion so the SubagentField knows to fade it out.
+        if event.category == .task, let subIdx = subagents.firstIndex(where: { $0.id == toolId }) {
+            subagents[subIdx].status = isError ? .error : .success
+            subagents[subIdx].completedAt = Date()
+            // Prune it from the list after a short delay so it fades out.
+            Task { [weak self, toolId] in
+                try? await Task.sleep(nanoseconds: 3_500_000_000)
+                await MainActor.run { self?.subagents.removeAll { $0.id == toolId } }
+            }
+        }
+        // Refresh the monitor panel's data when a Bash tool_result lands.
+        if event.category == .bash { latestMonitor = event }
     }
 
     private func handlePartialEvent(_ obj: [String: Any]) {
@@ -586,34 +661,64 @@ final class ClaudeChatSession: ObservableObject {
         emitStreamingChunkIfReady(fullText: combined)
     }
 
-    /// Publish any newly-completed sentences from the streaming assistant text.
-    /// A sentence ends at `.!?` followed by whitespace or end-of-string. Multi-sentence
-    /// chunks are emitted together so the crawl doesn't tear apart tightly-coupled prose.
-    private func emitStreamingChunkIfReady(fullText: String) {
+    /// Publish a chunk of Claude's streaming reply once it's big enough to be a
+    /// meaningful beat on the crawl. We DELIBERATELY don't emit sentence-by-sentence —
+    /// the crawl can't visually separate beats that arrive faster than the rise-rate
+    /// would move them apart, so we wait for either a paragraph break (double newline)
+    /// or ~220 characters of pending text before publishing.
+    private func emitStreamingChunkIfReady(fullText: String, force: Bool = false) {
         let chars = Array(fullText)
         guard chars.count > assistantStreamCursor else { return }
 
-        // Scan for the LAST sentence terminator past the cursor. Anything before it
-        // is fair game to emit; anything after is still being written.
-        var lastEnd: Int = -1
-        var i = assistantStreamCursor
-        while i < chars.count {
-            let c = chars[i]
-            if ".!?".contains(c) {
-                let next = i + 1
-                if next >= chars.count || chars[next].isWhitespace {
-                    lastEnd = next
-                }
-            }
-            i += 1
-        }
-        guard lastEnd > assistantStreamCursor else { return }
+        let cutoff: Int
 
-        let chunkChars = chars[assistantStreamCursor..<lastEnd]
+        if force {
+            // Turn is ending. Emit the ENTIRE remainder in one chunk, even if it
+            // contains paragraph breaks. Previously we still snapped to the first
+            // \n\n here, which meant lists + summaries following a colon-then-list
+            // ("Here are four:\n1. …\n2. …\n\nSummary.") got truncated: voice cut
+            // out after the last non-force-emitted sentence and never spoke the tail.
+            cutoff = chars.count
+        } else {
+            let pendingCount = chars.count - assistantStreamCursor
+
+            var breakIndex: Int? = nil
+            var i = assistantStreamCursor
+            while i < chars.count - 1 {
+                if chars[i] == "\n", chars[i + 1] == "\n" {
+                    breakIndex = i
+                    break
+                }
+                i += 1
+            }
+
+            if let b = breakIndex {
+                cutoff = b
+            } else if pendingCount >= 160 {
+                // Snap to last sentence terminator so mid-sentence doesn't get cut.
+                var lastSentenceEnd = -1
+                var j = assistantStreamCursor
+                while j < chars.count {
+                    if ".!?".contains(chars[j]) {
+                        let next = j + 1
+                        if next >= chars.count || chars[next].isWhitespace {
+                            lastSentenceEnd = next
+                        }
+                    }
+                    j += 1
+                }
+                guard lastSentenceEnd > assistantStreamCursor else { return }
+                cutoff = lastSentenceEnd
+            } else {
+                return
+            }
+        }
+
+        let chunkChars = chars[assistantStreamCursor..<cutoff]
         let raw = String(chunkChars).trimmingCharacters(in: .whitespacesAndNewlines)
-        assistantStreamCursor = lastEnd
+        assistantStreamCursor = cutoff
         let cleaned = Self.stripMarkdownForSpeech(raw)
-        guard cleaned.count >= 8 else { return }
+        guard cleaned.count >= 12 else { return }
         streamingChunk = cleaned
     }
 
@@ -631,6 +736,11 @@ final class ClaudeChatSession: ObservableObject {
 
     private func handleResultEvent(_ obj: [String: Any]) {
         finalizeStreamingText()
+        // Flush any remaining assistant text as a final streaming chunk so shorter
+        // replies (which never reached the size threshold) are still voiced.
+        if let last = timeline.last, case let .assistantText(text, _) = last.kind {
+            emitStreamingChunkIfReady(fullText: text, force: true)
+        }
         activeAction = nil
         // `result` is the CLI's definitive "turn complete" signal, so we mark the session
         // idle here — even though the OS process may still take a beat to exit. Waiting
@@ -1021,8 +1131,12 @@ final class ClaudeChatSession: ObservableObject {
         t = t.replacingOccurrences(of: "`", with: "")
         t = t.replacingOccurrences(of: "**", with: "")
         t = t.replacingOccurrences(of: "__", with: "")
-        t = t.replacingOccurrences(of: "^#{1,6}\\s+", with: "", options: .regularExpression)
-        t = t.replacingOccurrences(of: "^[-*+]\\s+", with: "", options: .regularExpression)
+        // Multiline anchors so bulleted lists get the dashes stripped from every
+        // line, not just the first. Without this, "- one\n- two" reads as
+        // "one - two" and the voice literally says "dash".
+        t = t.replacingOccurrences(of: "(?m)^#{1,6}\\s+", with: "", options: .regularExpression)
+        t = t.replacingOccurrences(of: "(?m)^\\s*[-*+]\\s+", with: "", options: .regularExpression)
+        t = t.replacingOccurrences(of: "(?m)^\\s*\\d+\\.\\s+", with: "", options: .regularExpression)
         t = t.replacingOccurrences(of: "\\[([^\\]]+)\\]\\([^\\)]+\\)", with: "$1", options: .regularExpression)
         return t.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -1105,6 +1219,22 @@ final class ClaudeChatSession: ObservableObject {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         if path.hasPrefix(home) { return "~" + path.dropFirst(home.count) }
         return path
+    }
+
+    // MARK: - Subagent state
+
+    struct SubagentState: Identifiable, Equatable {
+        let id: String
+        let label: String
+        let startedAt: Date
+        /// Deterministic hue index 0…4 so multiple concurrent subagents look distinct.
+        let hueSeed: Int
+        var status: Status
+        /// When the tool_result landed. Nil while running. Once set, the sphere
+        /// fades out and is pruned a few seconds later.
+        var completedAt: Date?
+
+        enum Status: String { case running, success, error }
     }
 
     nonisolated static func locateClaudeBinary() -> String? {

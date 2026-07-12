@@ -100,9 +100,18 @@ struct ChatView: View {
             // doesn't visually append onto stale text.
             if !listening { draft = "" }
         }
-        // Speak the interpreter's conversational narration when it arrives. This runs
-        // for both timeline and orb modes so replies feel human. Falls back to a
-        // heuristic narration if the Haiku interpreter is unavailable.
+        // Speak Claude's own prose as it streams in, sentence chunk by sentence chunk.
+        // These are the "intermediate conversational blocks" — the running commentary
+        // Claude writes between tool calls.
+        .onReceive(session.$streamingChunk) { chunk in
+            guard let chunk, !chunk.isEmpty else { return }
+            speechOutput.speakIfNew(chunk)
+        }
+        // Speak the interpreter's conversational narration when it arrives. This is
+        // the wrap-up summary — always spoken, even if we already voiced streaming
+        // chunks during the turn. Some redundancy is acceptable: the streaming version
+        // is Claude's live running commentary, the interpretation is the polished
+        // recap the user asked to always hear.
         .onReceive(session.$interpretation) { interp in
             guard let interp, !interp.narration.isEmpty else { return }
             speechOutput.speakIfNew(interp.narration)

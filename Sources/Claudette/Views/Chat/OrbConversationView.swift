@@ -18,19 +18,21 @@ struct OrbConversationView: View {
     @State private var lastAnnouncedState: OrbState = .idle
     @State private var savedSilenceInterval: TimeInterval = 0.9
     @State private var crawlBeats: [CrawlBeat] = []
+    @State private var isFullscreen: Bool = false
     @FocusState private var orbFocused: Bool
 
     var body: some View {
         GeometryReader { geo in
-            // Orb sits in the lower-middle so the whole upper region is available for
-            // the crawl. Smaller radius on tight windows so the crawl still has room
-            // to travel.
+            // Big central sphere. The refracted CLI text inside is much more legible
+            // at this scale — small numbers meant the log inside was unreadable.
             let side = min(geo.size.width, geo.size.height)
-            let orbRadius = min(side * 0.16, 180)
-            let center = CGPoint(x: geo.size.width / 2, y: geo.size.height * 0.62)
-            let crawlOriginY = center.y - orbRadius - 44
-            let crawlEndY: CGFloat = 96
-            let crawlTravel = max(120, crawlOriginY - crawlEndY)
+            let orbRadius = min(side * 0.24, 260)
+            let center = CGPoint(x: geo.size.width / 2, y: geo.size.height * 0.36)
+            // Crawl now spans nearly the full screen — beats rise from just above the
+            // bottom HUD all the way up past the orb (which sits IN FRONT of them
+            // and occludes as they pass), fading gradually as they approach the top.
+            let crawlBottomY = geo.size.height - 60
+            let crawlTopY: CGFloat = 70
 
             ZStack {
                 // ── 1. Deep-space backdrop ────────────────────────────────────
@@ -46,6 +48,21 @@ struct OrbConversationView: View {
                 // ── 4. Concentric orbital rings on multiple planes ────────────
                 OrbitalPlanes(state: orbState, center: center, radius: orbRadius)
 
+                // ── 4b. Unified crawl BEHIND the orb ──────────────────────────
+                //  Beats spawn at the bottom, drift up the full height of the screen,
+                //  pass BEHIND the sphere (the sphere occludes them), and fade slowly
+                //  over the last ~250 pt before the top. No border boxes — just text
+                //  with a strong drop-shadow so it reads over the busy backdrop.
+                SkywardCrawl(
+                    beats: crawlBeats,
+                    liveText: liveCaptionText,
+                    bottomY: crawlBottomY,
+                    topY: crawlTopY,
+                    centerX: geo.size.width / 2,
+                    state: orbState
+                )
+                .allowsHitTesting(false)
+
                 // ── 5. Rear satellites (behind orb) ───────────────────────────
                 SatelliteField(
                     labels: satellites,
@@ -60,16 +77,31 @@ struct OrbConversationView: View {
                     .allowsHitTesting(false)
 
                 // ── 6. The orb itself ─────────────────────────────────────────
-                OrbSphere(state: orbState, isPressing: isPressing, level: audioLevel)
+                OrbSphere(
+                    state: orbState,
+                    isPressing: isPressing,
+                    level: audioLevel,
+                    rawLog: session.rawLog
+                )
                     .frame(width: orbRadius * 2, height: orbRadius * 2)
                     .position(center)
                     .gesture(pressGesture)
                     .focusable(true)
                     .focused($orbFocused)
+                    // Kill macOS's default blue focus rectangle around the sphere.
+                    // Keyboard focus still works — this just hides the visual box.
+                    .focusEffectDisabled()
                     .onKeyPress(phases: [.down, .up]) { press in
-                        guard press.key == .space || press.key == .return else {
-                            return .ignored
+                        // Escape is reserved: exit fullscreen if we're in fullscreen,
+                        // do nothing otherwise. Explicitly NOT push-to-talk.
+                        if press.key == .escape {
+                            if press.phase == .down, isFullscreen {
+                                toggleFullscreen()
+                            }
+                            return .handled
                         }
+                        // Any other key (letters, digits, arrows, spacebar, return…)
+                        // acts as a push-to-talk trigger while held.
                         switch press.phase {
                         case .down: startPressing()
                         case .up:   endPressing()
@@ -83,6 +115,15 @@ struct OrbConversationView: View {
                     .accessibilityHint("Hold to speak. Release to send.")
                     .accessibilityAddTraits(.isButton)
                     .accessibilityAction { toggleTapForVoiceOver() }
+
+                // ── 6b. Sub-agent spheres — pop out of the main orb, orbit ────
+                SubagentField(
+                    subagents: session.subagents,
+                    center: center,
+                    orbRadius: orbRadius,
+                    state: orbState
+                )
+                .allowsHitTesting(false)
 
                 // ── 7. Ripple rings — TTS-driven ──────────────────────────────
                 RippleRings(state: orbState, center: center, orbRadius: orbRadius)
@@ -101,25 +142,34 @@ struct OrbConversationView: View {
                 ParticleField(state: orbState, center: center, orbRadius: orbRadius)
                     .allowsHitTesting(false)
 
-                // ── 9b. Skyward crawl — beats scroll upward and fade ──────────
-                SkywardCrawl(
-                    beats: crawlBeats,
-                    originY: crawlOriginY,
-                    travelDistance: crawlTravel,
-                    centerX: geo.size.width / 2,
-                    state: orbState
-                )
-                .allowsHitTesting(false)
-
                 // ── 10. Foreground UI ─────────────────────────────────────────
                 VStack {
                     topBar
                     Spacer()
-                    captions
                 }
+
+                // Compact state chip pinned just under the sphere. This replaces the
+                // old caption block — the actual text lives in the crawl now.
+                StateChip(state: orbState)
+                    .position(x: geo.size.width / 2, y: center.y + orbRadius + 12)
+                    .allowsHitTesting(false)
 
                 HUDLayer(session: session, state: orbState)
                     .allowsHitTesting(false)
+
+                // ── 10b. Side panels: Todos (right) + Monitor (left) ──────────
+                if !session.todos.isEmpty {
+                    TodoPanel(todos: session.todos, state: orbState)
+                        .position(x: geo.size.width - 160, y: geo.size.height * 0.42)
+                        .allowsHitTesting(false)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
+                if let mon = session.latestMonitor {
+                    MonitorPanel(event: mon, state: orbState)
+                        .position(x: 160, y: geo.size.height * 0.42)
+                        .allowsHitTesting(false)
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+                }
 
                 // ── 11. Vignette + film grain ─────────────────────────────────
                 VignetteOverlay()
@@ -132,10 +182,19 @@ struct OrbConversationView: View {
             orbFocused = true
             savedSilenceInterval = speechInput.silenceInterval
             speechInput.silenceInterval = 999
-            announce("Conversation mode. Hold the orb to speak.")
+            // Sync fullscreen state with the current window in case orb mode is
+            // entered while the window is already fullscreen.
+            isFullscreen = currentWindow()?.styleMask.contains(.fullScreen) ?? false
+            announce("Conversation mode. Hold any key to speak.")
         }
         .onDisappear {
             speechInput.silenceInterval = savedSilenceInterval
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in
+            isFullscreen = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in
+            isFullscreen = false
         }
         .onChange(of: orbState) { _, new in
             if new != lastAnnouncedState {
@@ -163,13 +222,31 @@ struct OrbConversationView: View {
         }
     }
 
-    /// Push a beat onto the crawl. Skips near-duplicates so a repeated liveNarration
-    /// value doesn't spam the crawl, and trims older beats past a soft cap.
+    /// Push a beat onto the crawl. Guarantees vertical spacing between beats by
+    /// coalescing rapid-fire additions:
+    /// - Exact duplicates in the last 3 beats are dropped.
+    /// - If the last beat is younger than 0.9 s (i.e. it hasn't travelled far enough
+    ///   to leave clear space above the bottom), we MERGE this text into it rather
+    ///   than stacking a second beat right on top. This is what stops the "wall of
+    ///   overlapping paragraphs" the user saw when streaming text arrived quickly.
+    /// Exceptions: `narration` (final interpreter reply) always gets its own beat.
     private func addCrawlBeat(text: String, kind: CrawlBeat.Kind) {
         if crawlBeats.suffix(3).contains(where: { $0.text == text }) { return }
-        crawlBeats.append(CrawlBeat(text: text, spawnedAt: Date(), kind: kind))
-        if crawlBeats.count > 24 {
-            crawlBeats.removeFirst(crawlBeats.count - 24)
+
+        let now = Date()
+        if kind != .narration,
+           let lastIdx = crawlBeats.indices.last,
+           now.timeIntervalSince(crawlBeats[lastIdx].spawnedAt) < 0.9,
+           crawlBeats[lastIdx].kind == kind {
+            let combined = crawlBeats[lastIdx].text + " " + text
+            crawlBeats[lastIdx].text = combined
+            crawlBeats[lastIdx].spawnedAt = now
+            return
+        }
+
+        crawlBeats.append(CrawlBeat(text: text, spawnedAt: now, kind: kind))
+        if crawlBeats.count > 16 {
+            crawlBeats.removeFirst(crawlBeats.count - 16)
         }
     }
 
@@ -199,66 +276,52 @@ struct OrbConversationView: View {
                 )
             }
             .buttonStyle(.plain)
-            .keyboardShortcut(.escape, modifiers: [])
+            // Escape is now owned by our onKeyPress handler — it exits fullscreen
+            // if fullscreen, so we can't bind it here too.
             .accessibilityHint("Return to the timeline view.")
+
             Spacer()
+
+            Button(action: toggleFullscreen) {
+                Image(systemName: isFullscreen
+                      ? "arrow.down.right.and.arrow.up.left"
+                      : "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.75))
+                    .frame(width: 32, height: 26)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(Color.white.opacity(0.05))
+                            .overlay(
+                                Capsule(style: .continuous)
+                                    .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
+                            )
+                    )
+            }
+            .buttonStyle(.plain)
+            .help(isFullscreen ? "Exit fullscreen (Esc)" : "Enter fullscreen")
+            .accessibilityLabel(isFullscreen ? "Exit fullscreen" : "Enter fullscreen")
         }
         .padding(.horizontal, 22)
         .padding(.top, 18)
     }
 
-    private var captions: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(orbState.hue)
-                    .frame(width: 5, height: 5)
-                    .shadow(color: orbState.hue, radius: 6)
-                Text(orbState.description)
-                    .font(.system(size: 10, weight: .bold))
-                    .tracking(2.0)
-                    .foregroundStyle(orbState.hue.opacity(0.9))
-                    .textCase(.uppercase)
-            }
-            ScrollView(.vertical, showsIndicators: false) {
-                Text(captionText)
-                    .font(.system(size: 22, weight: .medium, design: .serif))
-                    .foregroundStyle(Color.white.opacity(0.92))
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: 700)
-                    .padding(.horizontal, 8)
-                    .shadow(color: .black.opacity(0.6), radius: 8)
-                    .id(captionText)
-                    .transition(.opacity)
-                    .animation(.easeInOut(duration: 0.24), value: captionText)
-            }
-            .frame(maxWidth: 740, maxHeight: 200)
-        }
-        .padding(.bottom, 48)
-        .padding(.horizontal, 32)
-        .frame(maxWidth: .infinity)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.updatesFrequently)
-    }
-
-    private var captionText: String {
+    /// The text shown as the "live" (in-flight) beat at the bottom of the crawl —
+    /// the mic transcript while listening, the current tool intent while thinking,
+    /// otherwise nil. This is what the user sees updating in real time; committed
+    /// beats live in `crawlBeats` and rise up the screen from there.
+    private var liveCaptionText: String? {
         if speechInput.isListening {
             let t = speechInput.partialTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
             return t.isEmpty ? "Listening…" : t
         }
         if session.isRunning {
-            // Prefer Claude's own last streamed sentence, then the live tool beat,
-            // then the raw tool title. This mirrors what feels most human to hear.
-            if let chunk = session.streamingChunk, !chunk.isEmpty { return chunk }
-            if let beat = session.liveNarration, !beat.isEmpty { return beat }
             if let a = session.activeAction { return a.humanTitle }
-            return "Thinking…"
+            return nil  // liveNarration already goes into crawlBeats
         }
-        if speechOutput.isSpeaking, let n = session.interpretation?.narration { return n }
-        if session.isInterpreting { return "Composing my thoughts…" }
-        if let n = session.interpretation?.narration { return n }
-        return "Hold the orb to speak."
+        if session.isInterpreting { return "Composing…" }
+        if crawlBeats.isEmpty { return "Hold the orb to speak." }
+        return nil
     }
 
     // MARK: - Satellites
@@ -340,6 +403,20 @@ struct OrbConversationView: View {
 
     private func toggleTapForVoiceOver() {
         if isPressing { endPressing() } else { startPressing() }
+    }
+
+    /// Toggle the frontmost app window's native macOS fullscreen. Escape (owned by
+    /// our onKeyPress handler) calls this when `isFullscreen == true`.
+    private func toggleFullscreen() {
+        guard let window = currentWindow() else { return }
+        window.toggleFullScreen(nil)
+    }
+
+    /// Best-effort lookup of the window hosting the orb — keyWindow first, main next,
+    /// then the first visible window. Called during onAppear to sync `isFullscreen`
+    /// with whatever the system state actually is.
+    private func currentWindow() -> NSWindow? {
+        NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible })
     }
 
     private func announce(_ text: String) {
@@ -725,6 +802,8 @@ private struct OrbSphere: View {
     let state: OrbState
     let isPressing: Bool
     let level: Double
+    /// Raw Claude Code stdout, rendered as a refracted ticker inside the sphere.
+    let rawLog: String
 
     var body: some View {
         TimelineView(.animation) { context in
@@ -757,13 +836,24 @@ private struct OrbSphere: View {
                     .scaleEffect(haloScale(t: t, phase: 0.5))
                     .opacity(haloOpacity(t: t, phase: 0.5) * 0.6)
 
-                // Plasma sphere body.
+                // Plasma sphere body + refracted CLI ticker inside.
                 GeometryReader { g in
                     let size = min(g.size.width, g.size.height)
-                    Canvas { ctx, canvasSize in
-                        Self.drawPlasma(context: &ctx, size: canvasSize, t: t, state: state, level: level)
+                    ZStack {
+                        Canvas { ctx, canvasSize in
+                            Self.drawPlasma(context: &ctx, size: canvasSize, t: t, state: state, level: level)
+                        }
+                        .frame(width: size, height: size)
+
+                        // Raw Claude Code stdout, refracted through a virtual glass
+                        // lens. Sits ON TOP of the plasma so you can read it, but
+                        // BELOW the rim/specular/shadow overlays so the highlights
+                        // still sell the "3D sphere" illusion.
+                        RefractionText(rawLog: rawLog, state: state)
+                            .frame(width: size, height: size)
+                            .opacity(0.85)
+                            .blendMode(.screen)
                     }
-                    .frame(width: size, height: size)
                     .clipShape(Circle())
                     .overlay(
                         // Rim light — bright arc on the top-left, subtle glow all around.
@@ -903,6 +993,103 @@ private struct OrbSphere: View {
         case .speaking: return 30 + 12 * CGFloat(sin(t * 6.0))
         case .idle: return 24 + 3 * CGFloat(sin(t * 0.9))
         }
+    }
+}
+
+// MARK: - Refraction text
+
+/// Draws the raw Claude Code stdout log inside the sphere with three tricks that
+/// together sell the "seen through curved glass" look:
+///
+/// - **Sine displacement** — each line is horizontally offset by two summed sine
+///   waves parameterised on Y and time. Gives the shimmering water/heat-haze feel.
+/// - **Radial pinch** — lines near the top/bottom edges of the sphere clip get
+///   pulled toward the horizontal centre in proportion to their distance from the
+///   equator. That's what mimics a fisheye lens's compression at the poles.
+/// - **Chromatic aberration** — each line is drawn three times at slightly offset
+///   positions, tinted red, cyan, and neutral. This is the RGB fringing you get
+///   at the edges of a real lens.
+///
+/// The text is intentionally low-opacity + small so it reads as *inside* the orb
+/// rather than a UI element on top of it.
+private struct RefractionText: View {
+    let rawLog: String
+    let state: OrbState
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            GeometryReader { geo in
+                Canvas(rendersAsynchronously: true) { ctx, size in
+                    drawLog(ctx: &ctx, size: size, t: t)
+                }
+                .blur(radius: 0.6)
+            }
+        }
+    }
+
+    private func drawLog(ctx: inout GraphicsContext, size: CGSize, t: Double) {
+        // Trim each line to something visible; a full stream-json line can be 2 KB.
+        // We show fewer, longer lines now that the sphere is bigger — legibility
+        // beats density.
+        let lines: [String] = rawLog
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { String($0) }
+            .suffix(28)
+            .map { line in
+                let clipped = line.count > 110 ? String(line.prefix(110)) + "…" : line
+                return clipped
+            }
+        guard !lines.isEmpty else { return }
+
+        let lineHeight: CGFloat = 14
+        let bottomPad: CGFloat = 14
+        let bottomY = size.height - bottomPad
+        let cx = size.width / 2
+        let halfH = size.height / 2
+
+        for (i, line) in lines.enumerated() {
+            let indexFromBottom = lines.count - 1 - i
+            let baseY = bottomY - CGFloat(indexFromBottom) * lineHeight
+            if baseY < -lineHeight || baseY > size.height + lineHeight { continue }
+
+            // Distance from horizontal equator, normalized to −1…1.
+            let dy = (baseY - halfH) / halfH
+            // Radial pinch — as we approach the pole, lines get pulled toward
+            // the vertical centreline. This is what breaks the illusion of a flat
+            // text overlay and makes it feel wrapped around a curved surface.
+            let pinch = 1.0 - Double(dy) * Double(dy) * 0.35
+
+            // Two summed sine waves for the shimmer. Slightly different periods
+            // so the pattern doesn't feel mechanical.
+            let wave1 = 5.5 * sin(Double(baseY) * 0.055 + t * 0.6)
+            let wave2 = 3.2 * sin(Double(baseY) * 0.14 - t * 0.9)
+            let dx = CGFloat((wave1 + wave2))
+            let baseX = cx + dx
+
+            // Fade lines near the top/bottom clip edges so the text feels enclosed
+            // by the sphere rather than hitting a hard boundary.
+            let edgeFade = 1.0 - min(1.0, max(0.0, (abs(Double(dy)) - 0.75) * 4.0))
+
+            // Chromatic aberration — offset red and cyan copies before the main.
+            drawGlyph(&ctx, text: line, x: baseX - 2.0, y: baseY, scale: pinch,
+                      color: Color(hex: 0xFF6188).opacity(0.40 * edgeFade))
+            drawGlyph(&ctx, text: line, x: baseX + 2.0, y: baseY, scale: pinch,
+                      color: Color(hex: 0x66E0FF).opacity(0.40 * edgeFade))
+            drawGlyph(&ctx, text: line, x: baseX,       y: baseY, scale: pinch,
+                      color: Color.white.opacity(0.85 * edgeFade))
+        }
+    }
+
+    /// Draw a single line as a monospaced Text into the canvas, anchored to its
+    /// centre so the aberration copies stack cleanly.
+    private func drawGlyph(_ ctx: inout GraphicsContext, text: String, x: CGFloat,
+                           y: CGFloat, scale: Double, color: Color) {
+        let scaled = 11.5 * scale
+        let t = Text(text)
+            .font(.system(size: CGFloat(scaled), weight: .medium, design: .monospaced))
+            .foregroundColor(color)
+        ctx.draw(t, at: CGPoint(x: x, y: y), anchor: .center)
     }
 }
 
@@ -1172,8 +1359,8 @@ private extension OrbState {
 /// each frame, so the crawl doesn't need to mutate its entries after adding.
 struct CrawlBeat: Identifiable, Equatable {
     let id = UUID()
-    let text: String
-    let spawnedAt: Date
+    var text: String
+    var spawnedAt: Date
     let kind: Kind
 
     enum Kind: Equatable {
@@ -1183,118 +1370,170 @@ struct CrawlBeat: Identifiable, Equatable {
     }
 }
 
-/// A stack of beats drifting upward like a Star Wars crawl. Each beat's Y position is
-/// a function of `now - spawnedAt`, so we don't animate SwiftUI properties — we just
-/// re-render every frame via TimelineView. That keeps the crawl smooth even when the
-/// beat set churns.
+/// One unified text region under the sphere. New beats appear at the bottom (large
+/// and bright), then rise upward, shrinking and fading as they approach the sphere.
+/// Positions are deterministic functions of (now − spawnedAt), so we don't animate
+/// individual view properties — we just re-render each frame under a TimelineView.
+///
+/// A fixed rise rate (`riseRate`) combined with the addCrawlBeat throttle guarantees
+/// vertical spacing between beats — no more piling up on top of each other.
 private struct SkywardCrawl: View {
     let beats: [CrawlBeat]
-    let originY: CGFloat
-    let travelDistance: CGFloat
+    /// Optional "in-flight" text at the very bottom (partial mic transcript, current
+    /// tool title, etc). It doesn't age — it stays anchored at the bottom until the
+    /// state changes.
+    let liveText: String?
+    /// Bottom edge of the crawl area — beats spawn here.
+    let bottomY: CGFloat
+    /// Top edge — beats fade out fully before crossing this Y (the sphere lives above).
+    let topY: CGFloat
     let centerX: CGFloat
     let state: OrbState
+
+    /// Points per second the beats rise. Slower now so text lingers long enough to
+    /// read fully. Combined with the addCrawlBeat throttle, consecutive beats are
+    /// still guaranteed ~30 pt of vertical spacing.
+    private let riseRate: CGFloat = 34
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
             let now = context.date
+            let travelDistance = bottomY - topY
             ZStack {
                 ForEach(beats) { beat in
                     let age = now.timeIntervalSince(beat.spawnedAt)
-                    let lifetime = Self.lifetime(for: beat.kind)
-                    if age < lifetime {
-                        let progress = age / lifetime
-                        let y = originY - CGFloat(progress) * travelDistance
-                        // Perspective: shrink slightly as the beat recedes upward.
-                        let scale = 1.0 - CGFloat(progress) * 0.32
-                        crawlText(beat)
-                            .opacity(Self.opacityCurve(progress: progress, kind: beat.kind))
-                            .scaleEffect(scale, anchor: .center)
-                            .frame(maxWidth: 620)
+                    let y = bottomY - CGFloat(age) * riseRate
+                    // Once a beat has climbed past the top edge, drop it out entirely.
+                    if y > topY - 40 {
+                        let travelled = bottomY - y            // 0 at spawn, grows
+                        let progress = travelled / max(1, travelDistance)
+                        let scale = 1.0 - min(0.30, progress * 0.30)
+                        crawlText(beat, isLive: false)
+                            .opacity(opacity(age: age, y: y))
+                            .scaleEffect(scale, anchor: .bottom)
+                            .frame(maxWidth: 560)
                             .position(x: centerX, y: y)
                     }
                 }
+                if let live = liveText, !live.isEmpty {
+                    liveView(text: live)
+                        .frame(maxWidth: 560)
+                        .position(x: centerX, y: bottomY)
+                        .transition(.opacity)
+                }
             }
             .compositingGroup()
-            .mask(topFadeMask)
         }
+        .animation(.easeInOut(duration: 0.22), value: liveText)
     }
 
-    private static func lifetime(for kind: CrawlBeat.Kind) -> Double {
-        switch kind {
-        case .live: return 12.0
-        case .streaming: return 16.0
-        case .narration: return 22.0
-        }
-    }
-
-    /// A gentle top fade so beats disappear cleanly into the vignette rather than
-    /// hard-clipping at the top edge.
-    private var topFadeMask: some View {
-        LinearGradient(
-            colors: [.clear, .white, .white, .white],
-            startPoint: .top, endPoint: .bottom
-        )
+    /// Fade in over the first 0.5 s, then hold at full opacity through most of the
+    /// travel, and fade out slowly over the LAST ~280 pt before reaching the top.
+    /// The long fade zone is what makes the crawl feel like it's dissolving into
+    /// space rather than being abruptly clipped.
+    private func opacity(age: Double, y: CGFloat) -> Double {
+        let fadeIn: Double = 0.5
+        let intro = age < fadeIn ? age / fadeIn : 1.0
+        let fadeOutRegion: CGFloat = 280
+        let fadeOutStart = topY + fadeOutRegion
+        if y > fadeOutStart { return intro }
+        let outProgress = (fadeOutStart - y) / fadeOutRegion
+        return intro * max(0, 1 - Double(outProgress))
     }
 
     @ViewBuilder
-    private func crawlText(_ beat: CrawlBeat) -> some View {
+    private func crawlText(_ beat: CrawlBeat, isLive: Bool) -> some View {
+        // No panels or borders around beats — just text with strong drop-shadows
+        // for contrast. The shadows are what make the text legible over the busy
+        // starfield/nebula backdrop.
         switch beat.kind {
         case .live:
-            // Tool-fired beats — italic-flavoured monospace label, quieter than prose.
             HStack(spacing: 8) {
                 Circle()
-                    .fill(state.hue.opacity(0.85))
-                    .frame(width: 4, height: 4)
+                    .fill(state.hue)
+                    .frame(width: 5, height: 5)
                     .shadow(color: state.hue, radius: 4)
                 Text(beat.text)
-                    .font(.system(size: 14, weight: .semibold, design: .rounded))
-                    .foregroundStyle(state.accent.opacity(0.95))
-                    .multilineTextAlignment(.leading)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.white.opacity(0.85))
+                    .tracking(0.6)
+                    .textCase(.uppercase)
             }
-            .shadow(color: .black.opacity(0.7), radius: 8)
-            .padding(.horizontal, 24)
+            .shadow(color: .black.opacity(0.9), radius: 6)
+            .padding(.horizontal, 12)
         case .streaming:
-            // Claude's own reply text — full-weight serif prose, the star of the show.
             Text(beat.text)
-                .font(.system(size: 19, weight: .medium, design: .serif))
-                .foregroundStyle(Color.white.opacity(0.94))
+                .font(.system(size: 17, weight: .medium, design: .serif))
+                .foregroundStyle(Color.white)
                 .multilineTextAlignment(.center)
-                .shadow(color: state.hue.opacity(0.55), radius: 8)
-                .shadow(color: .black.opacity(0.8), radius: 12)
-                .padding(.horizontal, 24)
+                .lineSpacing(3)
+                .shadow(color: .black.opacity(0.95), radius: 8)
+                .shadow(color: .black.opacity(0.75), radius: 3)
+                .padding(.horizontal, 18)
         case .narration:
-            // Final interpreter summary — visually distinguished with an accent bar.
-            VStack(spacing: 6) {
+            VStack(spacing: 8) {
                 Rectangle()
-                    .fill(state.accent.opacity(0.9))
-                    .frame(width: 34, height: 1)
+                    .fill(state.accent)
+                    .frame(width: 42, height: 1.2)
                     .shadow(color: state.accent, radius: 4)
                 Text(beat.text)
-                    .font(.system(size: 22, weight: .medium, design: .serif))
+                    .font(.system(size: 20, weight: .medium, design: .serif))
                     .foregroundStyle(Color.white)
                     .multilineTextAlignment(.center)
-                    .shadow(color: state.hue.opacity(0.7), radius: 10)
-                    .shadow(color: .black.opacity(0.85), radius: 14)
+                    .lineSpacing(4)
+                    .shadow(color: .black.opacity(0.95), radius: 10)
+                    .shadow(color: state.hue.opacity(0.4), radius: 14)
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, 20)
         }
     }
 
-    /// Fade in over the first 6% of lifetime, hold, fade out over the tail. Narration
-    /// lingers longer at full opacity than a live beat.
-    private static func opacityCurve(progress: Double, kind: CrawlBeat.Kind) -> Double {
-        let fadeIn = 0.06
-        let fadeOutStart: Double
-        switch kind {
-        case .live: fadeOutStart = 0.50
-        case .streaming: fadeOutStart = 0.60
-        case .narration: fadeOutStart = 0.65
+    /// Live in-flight text at the bottom edge. No box — just heavy text-shadow so
+    /// it reads over anything behind it.
+    @ViewBuilder
+    private func liveView(text: String) -> some View {
+        Text(text)
+            .font(.system(size: 18, weight: .medium, design: .serif))
+            .foregroundStyle(Color.white)
+            .italic(text.hasSuffix("…"))
+            .multilineTextAlignment(.center)
+            .lineSpacing(3)
+            .shadow(color: .black.opacity(0.95), radius: 10)
+            .shadow(color: state.hue.opacity(0.5), radius: 12)
+            .padding(.horizontal, 20)
+            .frame(maxWidth: 620)
+    }
+}
+
+// MARK: - State chip
+
+/// Small pill directly under the sphere showing the current OrbState. Replaces the
+/// old block caption — the caption text now lives in the crawl instead.
+private struct StateChip: View {
+    let state: OrbState
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(state.hue)
+                .frame(width: 5, height: 5)
+                .shadow(color: state.hue, radius: 5)
+            Text(state.description)
+                .font(.system(size: 10, weight: .bold))
+                .tracking(2.2)
+                .foregroundStyle(state.hue.opacity(0.95))
+                .textCase(.uppercase)
         }
-        if progress < fadeIn { return progress / fadeIn }
-        if progress > fadeOutStart {
-            return max(0, 1 - (progress - fadeOutStart) / (1 - fadeOutStart))
-        }
-        return 1
+        .padding(.horizontal, 11)
+        .padding(.vertical, 5)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.black.opacity(0.35))
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(state.hue.opacity(0.4), lineWidth: 0.6)
+                )
+        )
     }
 }
 
@@ -1369,6 +1608,302 @@ private struct ProcessingRing: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Subagent field
+
+/// Renders each active sub-agent from `session.subagents` as a small sphere that
+/// pops outward from the centre of the main orb on spawn, orbits at a distance
+/// while running, then dissolves back into the main sphere on completion.
+private struct SubagentField: View {
+    let subagents: [ClaudeChatSession.SubagentState]
+    let center: CGPoint
+    let orbRadius: CGFloat
+    let state: OrbState
+
+    /// Small palette used to give concurrent sub-agents visually distinct hues.
+    private static let palette: [Color] = [
+        Color(hex: 0xE5A25A), // amber
+        Color(hex: 0xA680E5), // purple
+        Color(hex: 0x64D9AF), // aurora green
+        Color(hex: 0x5AC8E5), // cyan
+        Color(hex: 0xE85A9B)  // pink
+    ]
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 45.0)) { context in
+            let now = context.date
+            let t = now.timeIntervalSinceReferenceDate
+            ZStack {
+                ForEach(Array(subagents.enumerated()), id: \.element.id) { idx, sub in
+                    let age = now.timeIntervalSince(sub.startedAt)
+                    // Spring-out animation: from centre to orbit radius over 0.6 s.
+                    let spawnT = min(1.0, age / 0.6)
+                    let orbitR = orbRadius * 0.20 + (orbRadius * 1.70 - orbRadius * 0.20) * easeOutBack(spawnT)
+                    // Orbit angle drifts, and each sub-agent has a different phase.
+                    let phase = Double(idx) * (2 * .pi / Double(max(subagents.count, 1)))
+                    let angle = phase + t * 0.55
+                    // Fade in during spawn, fade out after completion.
+                    let opacity: Double = {
+                        if let done = sub.completedAt {
+                            let doneAge = now.timeIntervalSince(done)
+                            return max(0, 1 - doneAge / 1.8)
+                        }
+                        return min(1, age / 0.4)
+                    }()
+                    // Reel back toward the parent orb while dissolving.
+                    let reelR: CGFloat = {
+                        guard let done = sub.completedAt else { return orbitR }
+                        let doneAge = now.timeIntervalSince(done)
+                        let f = CGFloat(min(1, doneAge / 1.8))
+                        return orbitR * (1 - f) + orbRadius * 0.30 * f
+                    }()
+
+                    let x = center.x + cos(angle) * reelR
+                    let y = center.y + sin(angle) * reelR
+                    let subR = orbRadius * 0.16 + orbRadius * 0.03 * CGFloat(sin(t * 3 + phase))
+                    let hue = Self.palette[sub.hueSeed % Self.palette.count]
+
+                    SubagentSphere(size: subR * 2, hue: hue, status: sub.status, t: t)
+                        .opacity(opacity)
+                        .position(x: x, y: y)
+                }
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(subagents.isEmpty ? "" : "\(subagents.count) sub-agent\(subagents.count == 1 ? "" : "s") running")
+    }
+
+    /// Easing that overshoots slightly at the end — reads as a "pop" rather than a
+    /// smooth glide, so the birth of each subagent has weight.
+    private func easeOutBack(_ x: Double) -> CGFloat {
+        let c1 = 1.70158
+        let c3 = c1 + 1
+        let n = x - 1
+        return CGFloat(1 + c3 * n * n * n + c1 * n * n)
+    }
+}
+
+/// A miniature version of the main orb — plasma-lit sphere with its own halo. Tints
+/// red once the sub-agent has completed with an error.
+private struct SubagentSphere: View {
+    let size: CGFloat
+    let hue: Color
+    let status: ClaudeChatSession.SubagentState.Status
+    let t: Double
+
+    var body: some View {
+        let tint: Color = {
+            switch status {
+            case .running: return hue
+            case .success: return hue
+            case .error:   return DiffLine.removedRed
+            }
+        }()
+        ZStack {
+            // Outer glow.
+            Circle()
+                .fill(tint)
+                .frame(width: size * 2.4, height: size * 2.4)
+                .blur(radius: 22)
+                .opacity(0.5)
+
+            // Sphere body — same recipe as the main orb but simplified.
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [
+                            Color.white.opacity(0.9),
+                            tint.opacity(0.85),
+                            tint.opacity(0.4),
+                            Color.black.opacity(0.75)
+                        ],
+                        center: UnitPoint(x: 0.35, y: 0.30),
+                        startRadius: 1,
+                        endRadius: size * 0.7
+                    )
+                )
+                .frame(width: size, height: size)
+                .overlay(
+                    Circle()
+                        .strokeBorder(Color.white.opacity(0.35), lineWidth: 0.8)
+                )
+                .shadow(color: tint.opacity(0.7), radius: 12)
+
+            // Running pulse — a subtle expanding ring while working.
+            if status == .running {
+                Circle()
+                    .stroke(tint.opacity(0.8 * (1 - pulse)), lineWidth: 1)
+                    .frame(width: size * (1 + pulse * 0.9),
+                           height: size * (1 + pulse * 0.9))
+            }
+        }
+    }
+
+    private var pulse: CGFloat {
+        let period = 1.4
+        let cycle = t.truncatingRemainder(dividingBy: period) / period
+        return CGFloat(cycle)
+    }
+}
+
+// MARK: - Todo panel
+
+/// A floating checklist showing Claude's live plan (from the TodoWrite tool). Docks
+/// on the right side of the screen. Empty state hides the panel entirely.
+private struct TodoPanel: View {
+    let todos: [TodoEntry]
+    let state: OrbState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(state.hue)
+                    .frame(width: 4, height: 4)
+                    .shadow(color: state.hue, radius: 4)
+                Text("PLAN")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(2.0)
+                    .foregroundStyle(Color.white.opacity(0.55))
+                Spacer(minLength: 0)
+                Text("\(doneCount)/\(todos.count)")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(state.accent)
+            }
+            ForEach(Array(todos.prefix(8).enumerated()), id: \.offset) { _, todo in
+                row(todo)
+            }
+            if todos.count > 8 {
+                Text("+ \(todos.count - 8) more…")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(Color.white.opacity(0.4))
+            }
+        }
+        .padding(12)
+        .frame(width: 260, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.black.opacity(0.55))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.10), lineWidth: 0.6)
+                )
+        )
+        .shadow(color: .black.opacity(0.6), radius: 16, y: 4)
+    }
+
+    private func row(_ todo: TodoEntry) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Group {
+                switch todo.status {
+                case "completed":
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(state.accent)
+                case "in_progress":
+                    Image(systemName: "circle.dotted")
+                        .foregroundStyle(state.hue)
+                default:
+                    Image(systemName: "circle")
+                        .foregroundStyle(Color.white.opacity(0.35))
+                }
+            }
+            .font(.system(size: 11, weight: .medium))
+            .frame(width: 14, alignment: .top)
+            .padding(.top, 2)
+
+            Text(todo.content)
+                .font(.system(size: 12, weight: todo.status == "in_progress" ? .semibold : .regular))
+                .foregroundStyle(
+                    todo.status == "completed"
+                        ? Color.white.opacity(0.5)
+                        : Color.white.opacity(0.9)
+                )
+                .strikethrough(todo.status == "completed", color: Color.white.opacity(0.35))
+                .lineLimit(2)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var doneCount: Int {
+        todos.filter { $0.status == "completed" }.count
+    }
+}
+
+// MARK: - Monitor panel
+
+/// A little terminal-styled panel showing the latest Bash tool: the command that
+/// ran, and the head/tail of its output. Docks on the left side of the screen.
+private struct MonitorPanel: View {
+    let event: ActionEvent
+    let state: OrbState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(dotColor)
+                    .frame(width: 4, height: 4)
+                    .shadow(color: dotColor, radius: 4)
+                Text("MONITOR")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(2.0)
+                    .foregroundStyle(Color.white.opacity(0.55))
+                Spacer(minLength: 0)
+                Text(statusLabel)
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(dotColor)
+            }
+            if let cmd = event.command?.trimmingCharacters(in: .whitespacesAndNewlines), !cmd.isEmpty {
+                Text("$ " + cmd)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(state.accent)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            }
+            Text(outputPreview)
+                .font(.system(size: 10, weight: .regular, design: .monospaced))
+                .foregroundStyle(Color.white.opacity(0.7))
+                .lineLimit(6)
+        }
+        .padding(12)
+        .frame(width: 280, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.black.opacity(0.65))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.10), lineWidth: 0.6)
+                )
+        )
+        .shadow(color: .black.opacity(0.6), radius: 16, y: 4)
+    }
+
+    private var statusLabel: String {
+        switch event.status {
+        case .running: return "RUNNING"
+        case .success: return event.isError ? "ERROR" : "OK"
+        case .error:   return "ERROR"
+        }
+    }
+
+    private var dotColor: Color {
+        switch event.status {
+        case .running: return state.hue
+        case .success: return event.isError ? DiffLine.removedRed : state.accent
+        case .error:   return DiffLine.removedRed
+        }
+    }
+
+    /// Show the tail of the output — that's where the interesting bit usually is.
+    /// Fall back to a short placeholder if the tool hasn't produced anything yet.
+    private var outputPreview: String {
+        let out = event.result.trimmingCharacters(in: .whitespacesAndNewlines)
+        if out.isEmpty { return event.status == .running ? "…" : "(no output)" }
+        let lines = out.split(separator: "\n").map(String.init)
+        let tail = lines.suffix(6).joined(separator: "\n")
+        return tail
     }
 }
 
