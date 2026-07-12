@@ -18,7 +18,11 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    # macos-15 (Sequoia) ships Xcode 16 / Swift 6 by default. macos-14 gave us
+    # Swift 5.10, which can't build a package that declares
+    # `swift-tools-version: 6.0` — and Claudette targets .macOS(.v15) so the
+    # newer SDK is the right match anyway.
+    runs-on: macos-15
     permissions:
       contents: write   # needed to create the Release
     steps:
