@@ -41,7 +41,11 @@ The `.github/workflows/release.yml` workflow triggers on any `v*` tag push. On a
 
 ## Re-run against an existing tag
 
-If a release build fails (flaky runner, network hiccup, etc.), go to Actions → Release → Run workflow, and enter the tag name (e.g. `v0.2.0`). It'll re-checkout and re-upload the assets, overwriting the previous ones on the draft.
+If a release build fails (flaky runner, network hiccup, etc.), go to Actions → Release → Run workflow, and enter the tag name (e.g. `v0.2.0`). The workflow is idempotent:
+
+- If **no release exists** for the tag, a fresh draft is created.
+- If a **draft release** already exists, its assets are replaced in-place with `gh release upload --clobber` — auto-generated notes are preserved so you don't lose any edits you'd started.
+- If the release has already been **published**, the workflow refuses to overwrite it (published artifacts are treated as immutable — users may already have downloaded them). Either delete / un-publish it manually, or push a new tag with a fix.
 
 ## Notarization (future)
 

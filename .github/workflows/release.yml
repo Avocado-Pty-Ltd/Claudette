@@ -60,16 +60,39 @@ jobs:
           shasum -a 256 Claudette.app.zip > Claudette.app.zip.sha256
           cat Claudette.app.zip.sha256
 
-      - name: Create draft release
+      - name: Create or update draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.tag.outputs.name }}"
-          # --draft so a human reviews the notes before making it public.
-          # --generate-notes uses GitHub's commit-based auto-notes as a starting point.
-          gh release create "$TAG" \
-            --draft \
-            --title "$TAG" \
-            --generate-notes \
-            build/Claudette.app.zip \
-            build/Claudette.app.zip.sha256
+
+          # Idempotent: on a first cut we create a draft release from scratch;
+          # on a re-run (or manual workflow_dispatch against an existing tag)
+          # we upload with --clobber so the retried build's artifacts replace
+          # the previous ones without failing on "release already exists".
+          #
+          # A published (non-draft) release is treated as immutable — we refuse
+          # to overwrite it so a retry can't silently mutate what users have
+          # already downloaded.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft)
+            if [[ "$IS_DRAFT" != "true" ]]; then
+              echo "::error::Release $TAG is already published; refusing to overwrite. Delete or unpublish it first, or push a new tag."
+              exit 1
+            fi
+            echo "Release $TAG already exists as a draft — uploading new assets with --clobber."
+            gh release upload "$TAG" \
+              build/Claudette.app.zip \
+              build/Claudette.app.zip.sha256 \
+              --clobber
+          else
+            echo "Creating fresh draft release $TAG."
+            # --draft so a human reviews the notes before making it public.
+            # --generate-notes uses GitHub's commit-based auto-notes as a starting point.
+            gh release create "$TAG" \
+              --draft \
+              --title "$TAG" \
+              --generate-notes \
+              build/Claudette.app.zip \
+              build/Claudette.app.zip.sha256
+          fi
