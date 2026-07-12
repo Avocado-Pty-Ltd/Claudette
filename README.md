@@ -2,6 +2,10 @@
 
 A native macOS front-end for [Claude Code](https://docs.claude.com/en/docs/claude-code) — the same agent, wrapped in a calm, video-like UI. Point it at any folder on your Mac and watch Claude work.
 
+![Claudette orb conversation mode — Claude thinking, with the raw stream-JSON refracting through the sphere, a live bash monitor panel, and orbiting idea satellites.](docs/screenshots/orb-thinking.png)
+
+*Orb conversation mode: press any key to talk. The sphere refracts the actual Claude Code JSON stream inside; short "beats" narrate what Claude is doing right now; the MONITOR panel tails the current bash tool; idea satellites orbit the sphere with the tags Haiku pulled out of the turn.*
+
 ## Why
 
 Claude Code is powerful but its CLI is a wall of text. Claudette turns each run into something you can *skim*:
