@@ -82,7 +82,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Use Apple's built-in voice")
                         .font(Theme.Font.body)
-                    Text("No API key required. Speaks via macOS `AVSpeechSynthesizer`. Faster, offline, less expressive than ElevenLabs.")
+                    Text("No API key required. Uses the built-in macOS speech synthesiser. Faster and offline, but less expressive than ElevenLabs.")
                         .font(Theme.Font.micro)
                         .foregroundStyle(Theme.Palette.textTertiary)
                 }

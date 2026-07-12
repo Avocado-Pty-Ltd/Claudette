@@ -373,7 +373,17 @@ guard let pngData = rep.representation(using: .png, properties: [:]) else {
 
 let outDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
     .appendingPathComponent("icon")
-try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
 let outURL = outDir.appendingPathComponent("claudette_1024.png")
-try pngData.write(to: outURL)
-print("wrote \(outURL.path)")
+
+// Explicit do/catch so failures surface the underlying error instead of a
+// generic "errors thrown from here are not handled" (top-level `try` compiles
+// in a Swift script but is easy to break by adding a wrapping function later)
+// or being silently swallowed by `try?` on the directory creation.
+do {
+    try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+    try pngData.write(to: outURL)
+    print("wrote \(outURL.path)")
+} catch {
+    fputs("failed to write icon: \(error.localizedDescription)\n", stderr)
+    exit(1)
+}

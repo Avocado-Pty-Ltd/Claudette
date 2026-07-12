@@ -171,7 +171,7 @@ struct ChatView: View {
         .buttonStyle(.plain)
         .help(voiceConfig.isConfigured
               ? (conversationMode ? "Stop conversation" : "Hands-free conversation")
-              : "Add an ElevenLabs key in Settings (⌘,) to start a conversation")
+              : "Enable Apple's built-in voice or add an ElevenLabs key in Settings (⌘,) to start a conversation")
     }
 
     private func startConversation() {
@@ -238,7 +238,9 @@ struct ChatView: View {
     }
 
     private var helpForTTS: String {
-        if !voiceConfig.isConfigured { return "Add an ElevenLabs key in Settings (⌘,) to hear replies" }
+        if !voiceConfig.isConfigured {
+            return "Enable Apple's built-in voice or add an ElevenLabs key in Settings (⌘,) to hear replies"
+        }
         return voiceConfig.ttsEnabled ? "Mute assistant voice" : "Read assistant replies aloud"
     }
 
