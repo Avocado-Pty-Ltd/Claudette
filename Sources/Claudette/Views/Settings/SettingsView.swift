@@ -75,55 +75,81 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 14) {
             sectionHeading(
                 "Voice",
-                subtitle: "Speech input uses on-device Apple recognition (no key needed). Assistant replies are read aloud by ElevenLabs — add your API key + voice below."
+                subtitle: "Speech input uses on-device Apple recognition (no key needed). For assistant replies, pick a provider below — Apple's built-in voice works offline, ElevenLabs sounds better but needs an API key."
             )
 
-            fieldRow(label: "ElevenLabs API key", help: "elevenlabs.io → Profile → API keys.") {
-                HStack(spacing: 8) {
-                    Group {
-                        if revealKey {
-                            TextField("sk_…", text: $draftKey)
-                        } else {
-                            SecureField("sk_…", text: $draftKey)
-                        }
-                    }
-                    .textFieldStyle(.plain)
-                    .font(Theme.Font.mono)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
-
-                    Button {
-                        revealKey.toggle()
-                    } label: {
-                        Image(systemName: revealKey ? "eye.slash" : "eye")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Theme.Palette.textSecondary)
-                            .frame(width: 30, height: 30)
-                            .background(RoundedRectangle(cornerRadius: 6).fill(Theme.Palette.bgSecondary))
-                    }
-                    .buttonStyle(.plain)
-                    .help("Show / hide")
+            Toggle(isOn: $voice.useAppleVoice) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Use Apple's built-in voice")
+                        .font(Theme.Font.body)
+                    Text("No API key required. Uses the built-in macOS speech synthesiser. Faster and offline, but less expressive than ElevenLabs.")
+                        .font(Theme.Font.micro)
+                        .foregroundStyle(Theme.Palette.textTertiary)
                 }
             }
+            .toggleStyle(.switch)
 
-            fieldRow(label: "Voice", help: "Pick one of the stock voices or paste a custom voice ID from your ElevenLabs dashboard.") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Picker("", selection: $draftVoiceId) {
-                        ForEach(VoiceConfig.curatedVoices, id: \.id) { v in
-                            Text("\(v.name) — \(v.description)")
-                                .tag(v.id)
+            // ElevenLabs credentials — disabled and dimmed when the user picks
+            // Apple's built-in voice, since they're only meaningful for the
+            // ElevenLabs provider.
+            Group {
+                fieldRow(label: "ElevenLabs API key", help: "elevenlabs.io → Profile → API keys.") {
+                    HStack(spacing: 8) {
+                        Group {
+                            if revealKey {
+                                TextField("sk_…", text: $draftKey)
+                            } else {
+                                SecureField("sk_…", text: $draftKey)
+                            }
                         }
-                        if !VoiceConfig.curatedVoices.map(\.id).contains(draftVoiceId) {
-                            Text("Custom: \(draftVoiceId)")
-                                .tag(draftVoiceId)
+                        .textFieldStyle(.plain)
+                        .font(Theme.Font.mono)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
+
+                        Button {
+                            revealKey.toggle()
+                        } label: {
+                            Image(systemName: revealKey ? "eye.slash" : "eye")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Theme.Palette.textSecondary)
+                                .frame(width: 30, height: 30)
+                                .background(RoundedRectangle(cornerRadius: 6).fill(Theme.Palette.bgSecondary))
                         }
+                        .buttonStyle(.plain)
+                        .help("Show / hide")
                     }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
+                }
 
-                    TextField("Or paste a custom voice ID", text: $draftVoiceId)
+                fieldRow(label: "Voice", help: "Pick one of the stock voices or paste a custom voice ID from your ElevenLabs dashboard.") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Picker("", selection: $draftVoiceId) {
+                            ForEach(VoiceConfig.curatedVoices, id: \.id) { v in
+                                Text("\(v.name) — \(v.description)")
+                                    .tag(v.id)
+                            }
+                            if !VoiceConfig.curatedVoices.map(\.id).contains(draftVoiceId) {
+                                Text("Custom: \(draftVoiceId)")
+                                    .tag(draftVoiceId)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+
+                        TextField("Or paste a custom voice ID", text: $draftVoiceId)
+                            .textFieldStyle(.plain)
+                            .font(Theme.Font.mono)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
+                    }
+                }
+
+                fieldRow(label: "Model", help: "eleven_multilingual_v2 works on every plan. eleven_turbo_v2_5 and eleven_flash_v2_5 are faster but tier-gated.") {
+                    TextField("eleven_multilingual_v2", text: $draftModelId)
                         .textFieldStyle(.plain)
                         .font(Theme.Font.mono)
                         .padding(.horizontal, 10)
@@ -132,16 +158,9 @@ struct SettingsView: View {
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
                 }
             }
-
-            fieldRow(label: "Model", help: "eleven_multilingual_v2 works on every plan. eleven_turbo_v2_5 and eleven_flash_v2_5 are faster but tier-gated.") {
-                TextField("eleven_multilingual_v2", text: $draftModelId)
-                    .textFieldStyle(.plain)
-                    .font(Theme.Font.mono)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
-            }
+            .disabled(voice.useAppleVoice)
+            .opacity(voice.useAppleVoice ? 0.35 : 1.0)
+            .animation(.easeInOut(duration: 0.18), value: voice.useAppleVoice)
 
             Toggle(isOn: $voice.ttsEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -170,13 +189,27 @@ struct SettingsView: View {
                 Circle()
                     .fill(voice.isConfigured ? DiffLine.addedGreen : Theme.Palette.textTertiary)
                     .frame(width: 6, height: 6)
-                Text(voice.isConfigured ? "TTS ready. Mic works without any key — just tap it." : "Voice output not configured yet. Speech input still works.")
+                Text(statusText)
                     .font(Theme.Font.caption)
                     .foregroundStyle(Theme.Palette.textTertiary)
                 Spacer()
-                testVoiceButton
+                if !voice.useAppleVoice {
+                    testVoiceButton
+                }
             }
         }
+    }
+
+    /// One-liner shown next to the ready dot at the bottom of the voice section.
+    /// Reflects the currently-selected provider, not just whether ANY TTS works.
+    private var statusText: String {
+        if voice.useAppleVoice {
+            return "Using Apple's built-in voice. No key required."
+        }
+        if voice.hasElevenLabsCredentials {
+            return "ElevenLabs ready. Mic works without any key — just tap it."
+        }
+        return "Voice output not configured yet. Speech input still works."
     }
 
     @ViewBuilder

@@ -37,8 +37,12 @@ if [[ -d "${BUNDLED_RESOURCES}" ]]; then
     cp -R "${BUNDLED_RESOURCES}" "${RES_DIR}/"
 fi
 
-# Icon (optional, generated on the fly)
-if [[ -f Claudette.icns ]]; then
+# App icon. Preferred path is the pre-built icon/Claudette.icns produced by
+# icon/render_icon.swift + iconutil; fall back to a stray Claudette.icns at
+# repo root if someone dropped one there for a quick swap.
+if [[ -f icon/Claudette.icns ]]; then
+    cp icon/Claudette.icns "${RES_DIR}/Claudette.icns"
+elif [[ -f Claudette.icns ]]; then
     cp Claudette.icns "${RES_DIR}/Claudette.icns"
 fi
 

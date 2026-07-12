@@ -27,7 +27,9 @@ final class SpeechOutput: NSObject, ObservableObject {
     private var queue: [String] = []
     /// Cap so a run-away turn (10 tool calls in 4 seconds) doesn't leave the orb
     /// narrating events from 30 seconds ago. Newer beats displace older ones.
-    private let maxQueueDepth: Int = 3
+    /// Bumped from 3 → 6 so streaming prose chunks + tool phrases can coexist in
+    /// the pipeline without silently dropping either.
+    private let maxQueueDepth: Int = 6
 
     init(config: VoiceConfig) {
         self.config = config
@@ -63,11 +65,17 @@ final class SpeechOutput: NSObject, ObservableObject {
 
     /// If nothing is currently speaking, pull the next queued beat and start it.
     /// Called from speakIfNew and from the finish delegates of both TTS providers.
+    /// Provider priority:
+    ///   1. Apple native — if the user explicitly opted in via Settings.
+    ///   2. ElevenLabs   — if credentials are configured.
+    ///   3. Apple native — graceful fallback so we never silently drop a beat.
     private func pumpQueue() {
         guard !isSpeaking else { return }
         guard !queue.isEmpty else { return }
         let next = queue.removeFirst()
-        if config.isConfigured {
+        if config.useAppleVoice {
+            speakViaNative(next)
+        } else if config.hasElevenLabsCredentials {
             speakViaElevenLabs(next)
         } else {
             speakViaNative(next)
