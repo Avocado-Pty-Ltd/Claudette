@@ -6,6 +6,8 @@
     <string>en</string>
     <key>CFBundleExecutable</key>
     <string>Claudette</string>
+    <key>CFBundleIconFile</key>
+    <string>Claudette</string>
     <key>CFBundleIdentifier</key>
     <string>com.claudette.app</string>
     <key>CFBundleInfoDictionaryVersion</key>
