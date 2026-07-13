@@ -107,10 +107,21 @@ final class ClaudeChatSession: ObservableObject {
         // Everything after the user's message belongs to this turn.
         turnStartIndex = timeline.count
         assistantStreamCursor = 0
-        // Header the turn in the pretty log — the ⏵ mirrors what a real terminal
-        // would show for a fresh user prompt.
-        let promptPreview = trimmed.count > 200 ? String(trimmed.prefix(200)) + "…" : trimmed
-        appendToPrettyLog("\n> \(promptPreview)\n\n")
+        // Header the turn in the pretty log with `> <prompt>`, mirroring what a
+        // real terminal shows. Normalize the prompt to a single line so multi-line
+        // input doesn't break the single-line header format. Only prepend a
+        // separator newline when the log already has content — turn 1 shouldn't
+        // start with a blank first line.
+        let singleLine = trimmed
+            .replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "  ", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: " +", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        let promptPreview = singleLine.count > 200 ? String(singleLine.prefix(200)) + "…" : singleLine
+        let separator = rawLog.isEmpty ? "" : "\n"
+        appendToPrettyLog("\(separator)> \(promptPreview)\n\n")
         // Speak an opener the moment the turn kicks off so the user hears the orb
         // "start listening" instead of a silent gap until the first tool call.
         liveNarration = Self.openerPhrase()
@@ -956,7 +967,11 @@ final class ClaudeChatSession: ObservableObject {
         case .search, .glob:
             arg = e.pattern ?? ""
         case .web:
-            arg = e.url.flatMap { URL(string: $0)?.host } ?? (e.url ?? "")
+            // Trim before parsing — CLI output can carry trailing newlines or
+            // stray whitespace that would otherwise trip URL(string:) and leave
+            // the raw whitespace-padded string in the log.
+            let raw = (e.url ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            arg = raw.isEmpty ? "" : (URL(string: raw)?.host ?? raw)
         case .task:
             let d = (e.description ?? "sub-agent").trimmingCharacters(in: .whitespacesAndNewlines)
             arg = d.count > 60 ? String(d.prefix(60)) + "…" : d
