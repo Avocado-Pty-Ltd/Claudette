@@ -6,12 +6,14 @@ struct ClaudetteApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var projectStore = ProjectStore()
     @StateObject private var voiceConfig = VoiceConfig()
+    @StateObject private var permissions = PermissionsCoordinator()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(projectStore)
                 .environmentObject(voiceConfig)
+                .environmentObject(permissions)
                 .frame(minWidth: 900, minHeight: 600)
         }
         .windowStyle(.hiddenTitleBar)
