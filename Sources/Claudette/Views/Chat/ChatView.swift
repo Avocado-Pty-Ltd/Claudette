@@ -103,17 +103,25 @@ struct ChatView: View {
         // Speak Claude's own prose as it streams in, sentence chunk by sentence chunk.
         // These are the "intermediate conversational blocks" — the running commentary
         // Claude writes between tool calls.
+        //
+        // Muted in orb mode: the user gets liveNarration for what's happening now
+        // (short tool-call beats) and interpretation.narration for the polished
+        // summary at the end. Speaking Claude's raw prose on top of the Haiku
+        // recap was audible repetition — the two channels cover the same content.
+        // Timeline mode keeps the streaming voice because the user is watching text
+        // scroll and expects the TTS to track it.
         .onReceive(session.$streamingChunk) { chunk in
             guard let chunk, !chunk.isEmpty else { return }
+            if conversationMode { return }
             speechOutput.speakIfNew(chunk)
         }
-        // Speak the interpreter's conversational narration when it arrives. This is
-        // the wrap-up summary — always spoken, even if we already voiced streaming
-        // chunks during the turn. Some redundancy is acceptable: the streaming version
-        // is Claude's live running commentary, the interpretation is the polished
-        // recap the user asked to always hear.
+        // Speak the interpreter's conversational narration when it arrives. In orb
+        // mode this is the definitive spoken reply. In timeline mode we skip it —
+        // we already voiced the raw stream above and the interpretation would just
+        // rephrase the same content back to the listener.
         .onReceive(session.$interpretation) { interp in
             guard let interp, !interp.narration.isEmpty else { return }
+            if !conversationMode { return }
             speechOutput.speakIfNew(interp.narration)
         }
         // Speak short live beats as tool calls fire — "let me look at ChatView.swift",
