@@ -29,10 +29,12 @@ final class ClaudeChatSession: ObservableObject {
     /// narration handles TTS. This exists so the crawl can show Claude's live planning
     /// prose ("I'll check the auth middleware first…") as it streams in.
     @Published private(set) var streamingChunk: String?
-    /// Rolling buffer of raw Claude Code stdout — the JSON stream events themselves,
-    /// unparsed. Displayed inside the orb sphere as a refracted, aberrated ticker so
-    /// you can see the actual CLI thinking scroll through. Capped at ~8 KB so it
-    /// never grows without bound.
+    /// Rolling buffer rendered inside the orb sphere as the refracted ticker.
+    /// This is a HUMAN-READABLE reconstruction of what Claude Code would print
+    /// to a terminal — user prompts, `⏺ Tool(args)` call lines, `  ⎿ result`
+    /// summaries, and Claude's own streamed prose interleaved. Not the raw
+    /// stream-json events (those existed here previously but were unreadable).
+    /// Capped at ~8 KB so it never grows without bound.
     @Published private(set) var rawLog: String = ""
     /// In-flight and recently-finished sub-agents from the Task tool. Rendered as
     /// small spheres orbiting the main orb, then dissolving after completion.
@@ -105,6 +107,10 @@ final class ClaudeChatSession: ObservableObject {
         // Everything after the user's message belongs to this turn.
         turnStartIndex = timeline.count
         assistantStreamCursor = 0
+        // Header the turn in the pretty log — the ⏵ mirrors what a real terminal
+        // would show for a fresh user prompt.
+        let promptPreview = trimmed.count > 200 ? String(trimmed.prefix(200)) + "…" : trimmed
+        appendToPrettyLog("\n> \(promptPreview)\n\n")
         // Speak an opener the moment the turn kicks off so the user hears the orb
         // "start listening" instead of a silent gap until the first tool call.
         liveNarration = Self.openerPhrase()
@@ -453,21 +459,28 @@ final class ClaudeChatSession: ObservableObject {
 
     private func appendStdoutData(_ data: Data) {
         buffer.append(data)
-        // Mirror raw stdout into rawLog so the orb sphere can render it as a
-        // refracted ticker. Trim from the head so the total stays bounded — anything
-        // older than ~8 KB is far off-screen inside the sphere anyway.
-        if let str = String(data: data, encoding: .utf8) {
-            rawLog += str
-            let cap = 8000
-            if rawLog.count > cap {
-                rawLog = String(rawLog.dropFirst(rawLog.count - cap))
-            }
-        }
+        // Note: we deliberately do NOT mirror the raw stream-json into rawLog.
+        // The individual event handlers below (handleAssistantEvent, completeAction,
+        // appendStreamingText, etc.) synthesise a human-readable "pretty CLI" log
+        // via appendToPrettyLog(…) so the orb ticker renders something legible.
         while let newlineIdx = buffer.firstIndex(of: 0x0A) {
             let lineData = buffer[..<newlineIdx]
             buffer.removeSubrange(...newlineIdx)
             if lineData.isEmpty { continue }
             handleStreamLine(Data(lineData))
+        }
+    }
+
+    /// Append a chunk of pretty-CLI text to the rolling log, trimmed to ~8 KB.
+    /// Callers pass either a full line ending in "\n" or an inline delta (for
+    /// streaming prose) — either way, the buffer stays bounded and the orb
+    /// re-renders on the @Published change.
+    private func appendToPrettyLog(_ text: String) {
+        guard !text.isEmpty else { return }
+        rawLog += text
+        let cap = 8000
+        if rawLog.count > cap {
+            rawLog = String(rawLog.dropFirst(rawLog.count - cap))
         }
     }
 
@@ -552,6 +565,8 @@ final class ClaudeChatSession: ObservableObject {
                 if let phrase = Self.livePhrase(for: event) {
                     liveNarration = phrase
                 }
+                // Pretty-CLI line for the refracted sphere log: `⏺ Read(foo.ts)`.
+                appendToPrettyLog("\n⏺ \(Self.prettyCallDescription(for: event))\n")
                 // Sidecar visualisations for specific tool categories.
                 switch event.category {
                 case .task:
@@ -625,6 +640,10 @@ final class ClaudeChatSession: ObservableObject {
         }
         // Refresh the monitor panel's data when a Bash tool_result lands.
         if event.category == .bash { latestMonitor = event }
+        // Pretty-CLI result line: `  ⎿ 128 lines` / `  ⎿ +12 −4` / etc.
+        if let summary = Self.prettyResultSummary(for: event) {
+            appendToPrettyLog("  ⎿ \(summary)\n")
+        }
     }
 
     private func handlePartialEvent(_ obj: [String: Any]) {
@@ -656,6 +675,10 @@ final class ClaudeChatSession: ObservableObject {
             currentAssistantTextId = item.id
             timeline.append(item)
         }
+        // Stream Claude's prose into the pretty log AS IT ARRIVES — character
+        // by character, so the sphere shows the reply forming in real time
+        // interleaved with `⏺` tool call lines.
+        appendToPrettyLog(text)
         // Whenever the stream has advanced past a sentence boundary, publish the
         // newly-completed chunk so the crawl can display it live.
         emitStreamingChunkIfReady(fullText: combined)
@@ -898,6 +921,93 @@ final class ClaudeChatSession: ObservableObject {
         case .todo:
             return "Plan updated."
         case .read, .edit, .multiEdit, .write, .ask, .other:
+            return nil
+        }
+    }
+
+    // MARK: - Pretty CLI reconstruction (for the refracted sphere log)
+
+    /// Formats a tool call as `⏺ Read(foo.ts)`, `⏺ Bash(swift build)`, etc.
+    /// Mirrors the visual language Claude Code uses in a real terminal so the
+    /// text inside the orb sphere reads like actual CLI output, not JSON.
+    private static func prettyCallDescription(for e: ActionEvent) -> String {
+        let name: String
+        switch e.category {
+        case .read:      name = "Read"
+        case .edit:      name = "Edit"
+        case .multiEdit: name = "MultiEdit"
+        case .write:     name = "Write"
+        case .bash:      name = "Bash"
+        case .search:    name = "Grep"
+        case .glob:      name = "Glob"
+        case .web:       name = "WebFetch"
+        case .todo:      name = "TodoWrite"
+        case .task:      name = "Task"
+        case .ask:       name = "AskUserQuestion"
+        case .other:     name = e.name
+        }
+        let arg: String
+        switch e.category {
+        case .read, .edit, .multiEdit, .write:
+            arg = e.shortFile ?? ""
+        case .bash:
+            let cmd = (e.command ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            arg = cmd.count > 60 ? String(cmd.prefix(60)) + "…" : cmd
+        case .search, .glob:
+            arg = e.pattern ?? ""
+        case .web:
+            arg = e.url.flatMap { URL(string: $0)?.host } ?? (e.url ?? "")
+        case .task:
+            let d = (e.description ?? "sub-agent").trimmingCharacters(in: .whitespacesAndNewlines)
+            arg = d.count > 60 ? String(d.prefix(60)) + "…" : d
+        case .todo, .ask, .other:
+            arg = ""
+        }
+        return arg.isEmpty ? name : "\(name)(\(arg))"
+    }
+
+    /// One-liner shown under a tool call — mirrors `  ⎿ 128 lines` / `+12 −4`
+    /// style summaries a terminal user would see. Returns nil for categories
+    /// where a summary line would just add noise.
+    private static func prettyResultSummary(for e: ActionEvent) -> String? {
+        if e.isError {
+            let first = e.result
+                .split(separator: "\n").first
+                .map(String.init)?.trimmingCharacters(in: .whitespaces) ?? "error"
+            let clipped = first.count > 80 ? String(first.prefix(80)) + "…" : first
+            return "✗ " + clipped
+        }
+        switch e.category {
+        case .read:
+            let lines = e.result.split(separator: "\n").count
+            return lines > 0 ? "\(lines) lines" : nil
+        case .edit, .multiEdit, .write:
+            let s = e.diffStats
+            if s.additions > 0 || s.deletions > 0 {
+                return "+\(s.additions) −\(s.deletions)"
+            }
+            return "done"
+        case .bash:
+            // First non-empty output line, capped. If empty, show "done".
+            let firstOutput = e.result
+                .split(separator: "\n")
+                .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+                .map(String.init)?.trimmingCharacters(in: .whitespaces)
+            guard let line = firstOutput, !line.isEmpty else { return "done" }
+            return line.count > 80 ? String(line.prefix(80)) + "…" : line
+        case .search, .glob:
+            let count = e.result.split(separator: "\n").count
+            return "\(count) match\(count == 1 ? "" : "es")"
+        case .web:
+            let bytes = e.result.utf8.count
+            return "\(bytes) bytes"
+        case .task:
+            return "sub-agent complete"
+        case .todo:
+            let done = e.todos?.filter { $0.status == "completed" }.count ?? 0
+            let total = e.todos?.count ?? 0
+            return total > 0 ? "plan: \(done)/\(total)" : "plan updated"
+        case .ask, .other:
             return nil
         }
     }
