@@ -267,33 +267,63 @@ struct OrbConversationView: View {
     // MARK: - Foreground UI
 
     /// Red pill shown at the top of the orb view when SpeechInput can't start.
-    /// Without this, permission failures were silent — the user pressed the orb,
-    /// nothing happened, no indication why. This surfaces the actual TCC error
-    /// so they can fix it in System Settings.
+    /// Tap opens the right System Settings pane so the user can flip the
+    /// permission in two clicks instead of hunting through nested menus.
     private func authErrorBanner(_ message: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 11, weight: .semibold))
-            Text(message)
-                .font(.system(size: 12, weight: .medium))
-                .lineLimit(2)
-                .multilineTextAlignment(.leading)
+        Button(action: { openPrivacyPane(for: message) }) {
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(message)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                    Text("Tap to open System Settings")
+                        .font(.system(size: 10, weight: .regular))
+                        .foregroundStyle(Color.white.opacity(0.75))
+                }
+                Spacer(minLength: 6)
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.75))
+            }
+            .foregroundStyle(Color.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(DiffLine.removedRed.opacity(0.90))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 0.5)
+                    )
+            )
+            .shadow(color: .black.opacity(0.5), radius: 10, y: 3)
         }
-        .foregroundStyle(Color.white)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(
-            Capsule(style: .continuous)
-                .fill(DiffLine.removedRed.opacity(0.85))
-                .overlay(
-                    Capsule(style: .continuous)
-                        .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
-                )
-        )
-        .shadow(color: .black.opacity(0.5), radius: 8, y: 2)
+        .buttonStyle(.plain)
         .padding(.top, 6)
         .padding(.horizontal, 22)
         .frame(maxWidth: 640, alignment: .center)
+    }
+
+    /// Deep-link into the right macOS Privacy pane based on which permission
+    /// failed. Uses the message text since SpeechInput reports a single
+    /// authError string. Falls back to the general Privacy pane if we can't
+    /// tell.
+    private func openPrivacyPane(for message: String) {
+        let msg = message.lowercased()
+        let raw: String
+        if msg.contains("microphone") {
+            raw = "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        } else if msg.contains("speech") {
+            raw = "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"
+        } else {
+            raw = "x-apple.systempreferences:com.apple.preference.security?Privacy"
+        }
+        if let url = URL(string: raw) {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     private var topBar: some View {
