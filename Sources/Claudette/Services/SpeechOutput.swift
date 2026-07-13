@@ -114,7 +114,7 @@ final class SpeechOutput: NSObject, ObservableObject {
         // still want the remaining beats to play once this one finishes.
         interruptCurrent()
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        utterance.voice = Self.resolveNativeVoice(identifier: config.appleVoiceIdentifier)
         // AVSpeechUtterance rate is in [Min, Max] with Default ≈ 0.5. Multiply by
         // the user's speed multiplier and clamp so we stay in valid range.
         let base = AVSpeechUtteranceDefaultSpeechRate
@@ -124,6 +124,17 @@ final class SpeechOutput: NSObject, ObservableObject {
         utterance.pitchMultiplier = 1.0
         isSpeaking = true
         nativeSynth.speak(utterance)
+    }
+
+    /// Look up the user-picked voice by its `AVSpeechSynthesisVoice.identifier`.
+    /// Falls back to the system's en-US default if the identifier is empty (the
+    /// user hasn't chosen one) or no longer resolves (voice was uninstalled).
+    private static func resolveNativeVoice(identifier: String) -> AVSpeechSynthesisVoice? {
+        let trimmed = identifier.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty, let voice = AVSpeechSynthesisVoice(identifier: trimmed) {
+            return voice
+        }
+        return AVSpeechSynthesisVoice(language: "en-US")
     }
 
     // MARK: - ElevenLabs

@@ -10,6 +10,36 @@ private extension String {
     }
 }
 
+/// Voices grouped by their `AVSpeechSynthesisVoiceQuality` tier, used by the
+/// Settings picker to render section headers ("Premium", "Enhanced", "Default").
+struct AppleVoiceGroup: Identifiable {
+    let quality: AVSpeechSynthesisVoiceQuality
+    let voices: [AVSpeechSynthesisVoice]
+    var id: Int { quality.rawValue }
+}
+
+extension AVSpeechSynthesisVoiceQuality {
+    /// Human-readable label for a quality tier — the section header in the picker.
+    var displayName: String {
+        switch self {
+        case .default: return "Default"
+        case .enhanced: return "Enhanced"
+        case .premium: return "Premium (Neural)"
+        @unknown default: return "Other"
+        }
+    }
+    /// Sort order for the picker: premium first (best quality), then enhanced,
+    /// then default. Users almost always want the best voice available.
+    var tierSortOrder: Int {
+        switch self {
+        case .premium: return 0
+        case .enhanced: return 1
+        case .default: return 2
+        @unknown default: return 3
+        }
+    }
+}
+
 struct SettingsView: View {
     @EnvironmentObject var voice: VoiceConfig
     @State private var draftKey: String = ""
@@ -17,6 +47,10 @@ struct SettingsView: View {
     @State private var draftModelId: String = ""
     @State private var revealKey: Bool = false
     @State private var testState: TestState = .idle
+    /// Local synthesiser used purely to preview an Apple voice from the picker.
+    /// Kept separate from the app-wide SpeechOutput so a preview doesn't disturb
+    /// an in-flight orb narration.
+    @State private var previewSynth = AVSpeechSynthesizer()
     @Environment(\.dismiss) private var dismiss
 
     enum TestState: Equatable {
@@ -88,6 +122,16 @@ struct SettingsView: View {
                 }
             }
             .toggleStyle(.switch)
+
+            // Voice picker — only shown when Apple voice is active. The
+            // difference between the drab default and an Enhanced / Premium
+            // voice is enormous, and both tiers are already installed (or a
+            // one-click download away in System Settings → Accessibility →
+            // Spoken Content → Manage Voices).
+            if voice.useAppleVoice {
+                appleVoicePicker
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
 
             // ElevenLabs credentials — disabled and dimmed when the user picks
             // Apple's built-in voice, since they're only meaningful for the
@@ -198,6 +242,89 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    /// Picker for the specific `AVSpeechSynthesisVoice` used when the Apple
+    /// voice toggle is on. Voices are grouped by quality tier: Premium (neural
+    /// voices from macOS 14+), Enhanced (2nd-gen downloadable), Default (basic).
+    /// The user can also pick "System default" to let `AVSpeechSynthesisVoice`
+    /// pick — useful if they don't care and just want whatever the OS picks.
+    private var appleVoicePicker: some View {
+        let groups = Self.installedAppleVoices()
+        return fieldRow(
+            label: "Voice",
+            help: "Premium and Enhanced voices sound dramatically better than the default. Download more in System Settings → Accessibility → Spoken Content → System Voice."
+        ) {
+            HStack(spacing: 10) {
+                Picker("", selection: $voice.appleVoiceIdentifier) {
+                    Text("System default").tag("")
+                    ForEach(groups) { group in
+                        Section(group.quality.displayName) {
+                            ForEach(group.voices, id: \.identifier) { v in
+                                Text("\(v.name)  ·  \(v.language)")
+                                    .tag(v.identifier)
+                            }
+                        }
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+
+                Button {
+                    previewAppleVoice()
+                } label: {
+                    Label("Preview", systemImage: "play.fill")
+                        .labelStyle(.iconOnly)
+                        .frame(width: 30, height: 26)
+                }
+                .buttonStyle(.plain)
+                .background(RoundedRectangle(cornerRadius: 7).fill(Theme.Palette.bgSecondary))
+                .help("Speak a sample sentence with the selected voice")
+            }
+        }
+    }
+
+    /// Enumerate installed voices from `AVSpeechSynthesisVoice.speechVoices()`
+    /// and group them by quality tier. English variants first, then everything
+    /// else — the app itself is English-only so English voices are most useful,
+    /// but users on other locales may still want to see their own languages.
+    private static func installedAppleVoices() -> [AppleVoiceGroup] {
+        let voices = AVSpeechSynthesisVoice.speechVoices()
+        // Sort: English > everything else, then by voice name within each locale.
+        let sorted = voices.sorted { a, b in
+            let ae = a.language.hasPrefix("en")
+            let be = b.language.hasPrefix("en")
+            if ae != be { return ae && !be }
+            if a.language != b.language { return a.language < b.language }
+            return a.name < b.name
+        }
+        // Group by quality — highest tier first so the picker's most eye-catching
+        // section is the best voices.
+        let byQuality = Dictionary(grouping: sorted, by: \.quality)
+        return byQuality
+            .map { AppleVoiceGroup(quality: $0.key, voices: $0.value) }
+            .sorted { $0.quality.tierSortOrder < $1.quality.tierSortOrder }
+    }
+
+    /// Speak a short sample using whatever voice is currently selected in the
+    /// picker (or the system default if none). Runs through a local
+    /// AVSpeechSynthesizer instance so it doesn't interfere with the app-wide
+    /// SpeechOutput queue that might be mid-narration.
+    private func previewAppleVoice() {
+        previewSynth.stopSpeaking(at: .immediate)
+        let sample = "Hi — this is what I'll sound like in Claudette."
+        let utterance = AVSpeechUtterance(string: sample)
+        if !voice.appleVoiceIdentifier.isEmpty,
+           let picked = AVSpeechSynthesisVoice(identifier: voice.appleVoiceIdentifier) {
+            utterance.voice = picked
+        } else {
+            utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        }
+        let base = AVSpeechUtteranceDefaultSpeechRate
+        utterance.rate = min(AVSpeechUtteranceMaximumSpeechRate,
+                             max(AVSpeechUtteranceMinimumSpeechRate,
+                                 base * Float(voice.speed)))
+        previewSynth.speak(utterance)
     }
 
     /// One-liner shown next to the ready dot at the bottom of the voice section.
