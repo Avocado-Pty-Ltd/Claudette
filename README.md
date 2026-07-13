@@ -16,24 +16,23 @@ Claude Code is powerful but its CLI is a wall of text. Claudette turns each run 
 - **Prose is prose.** Assistant text renders as serif Markdown with proper spacing, code fences, lists, quotes and inline code.
 - **The whole app breathes** — spring transitions on new cards, gentle pulses on running actions, no jitter, no cognitive tax.
 
-## Requirements
+## Install
 
-- macOS 14 (Sonoma) or newer
-- Xcode 15+ / Swift 5.9+
-- Claude Code CLI installed (`brew install claude` or `npm i -g @anthropic-ai/claude-code`)
-- Signed in with `claude auth` in Terminal at least once
+### From a release
 
-## Build
+Grab the latest `.dmg` from [Releases](https://github.com/Avocado-Pty-Ltd/Claudette/releases), open it, and drag **Claudette.app** onto the `/Applications` shortcut. First launch: right-click → **Open** — the build is ad-hoc signed rather than notarized, so Gatekeeper asks once.
+
+Prefer a zip? `Claudette.app.zip` is attached to every release too — unzip and drop into `/Applications`.
+
+### From source
+
+Requires macOS 15 (Sequoia) or newer, Xcode 16+ / Swift 6, and the [Claude Code](https://docs.claude.com/en/docs/claude-code) CLI installed and authenticated (`claude auth`).
 
 ```bash
+git clone https://github.com/Avocado-Pty-Ltd/Claudette.git
+cd Claudette
 ./build.sh
-open build/Claudette.app
-```
-
-Or drop it into `/Applications`:
-
-```bash
-cp -R build/Claudette.app /Applications/
+open build/Claudette.app       # or: cp -R build/Claudette.app /Applications/
 ```
 
 ## Anatomy of a chat

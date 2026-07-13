@@ -22,16 +22,17 @@ git push origin v0.2.0
 
 ## What happens next
 
-The `.github/workflows/release.yml` workflow triggers on any `v*` tag push. On a fresh `macos-14` runner it:
+The `.github/workflows/release.yml` workflow triggers on any `v*` tag push. On a fresh `macos-15` runner it:
 
 1. Checks out the tagged commit.
 2. Runs `./build.sh` — Swift build + `.app` bundle assembly + ad-hoc code sign.
 3. Zips `build/Claudette.app` with `ditto` (preserves resource forks and xattrs — plain `zip` breaks macOS bundle signatures).
-4. Generates a SHA256 checksum.
-5. Creates a **draft** release named after the tag, with:
+4. Builds `Claudette-<version>.dmg` via `create-dmg`, with the Claudette icon, a proper installer window layout, and the `/Applications` drop-link — the idiomatic macOS "open the dmg, drag app to Applications" experience.
+5. Generates SHA-256 sidecars for both artifacts.
+6. Creates a **draft** release named after the tag, with:
    - Auto-generated notes based on commits since the last tag (edit these before publishing).
-   - `Claudette.app.zip` attached.
-   - `Claudette.app.zip.sha256` attached.
+   - `Claudette-<version>.dmg` + its `.sha256` attached (primary — this is what the README points at).
+   - `Claudette.app.zip` + its `.sha256` attached (for users who prefer unzipping or need to script installs).
 
 ## Publish
 

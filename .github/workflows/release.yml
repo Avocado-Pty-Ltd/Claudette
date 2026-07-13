@@ -58,17 +58,54 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent Claudette.app Claudette.app.zip
           ls -lh Claudette.app.zip
 
-      - name: SHA256 checksum
+      - name: Install create-dmg
+        # Homebrew is preinstalled on macos-15; create-dmg is a small wrapper
+        # around hdiutil that produces a proper macOS installer window with the
+        # app icon + /Applications drop-link, matching what people expect when
+        # they double-click a .dmg from a Github release.
+        run: brew install create-dmg
+
+      - name: Build .dmg installer
         run: |
+          TAG="${{ steps.tag.outputs.name }}"
+          # Strip the leading `v` from the filename — Claudette-0.2.0.dmg is
+          # the idiomatic macOS naming, not Claudette-v0.2.0.dmg.
+          VERSION="${TAG#v}"
           cd build
-          shasum -a 256 Claudette.app.zip > Claudette.app.zip.sha256
+          # create-dmg exits non-zero if the resulting DMG can't be signed
+          # (spurious on ad-hoc); the `|| test -f` guard falls through only
+          # if the DMG was actually produced. See create-dmg#72.
+          create-dmg \
+            --volname "Claudette ${VERSION}" \
+            --volicon "../icon/Claudette.icns" \
+            --window-pos 200 120 \
+            --window-size 660 400 \
+            --icon-size 128 \
+            --icon "Claudette.app" 180 200 \
+            --hide-extension "Claudette.app" \
+            --app-drop-link 480 200 \
+            --no-internet-enable \
+            "Claudette-${VERSION}.dmg" \
+            "Claudette.app" \
+            || test -f "Claudette-${VERSION}.dmg"
+          ls -lh Claudette-*.dmg
+
+      - name: SHA256 checksums
+        run: |
+          TAG="${{ steps.tag.outputs.name }}"
+          VERSION="${TAG#v}"
+          cd build
+          shasum -a 256 Claudette.app.zip       > Claudette.app.zip.sha256
+          shasum -a 256 "Claudette-${VERSION}.dmg" > "Claudette-${VERSION}.dmg.sha256"
           cat Claudette.app.zip.sha256
+          cat "Claudette-${VERSION}.dmg.sha256"
 
       - name: Create or update draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.tag.outputs.name }}"
+          VERSION="${TAG#v}"
 
           # Idempotent: on a first cut we create a draft release from scratch;
           # on a re-run (or manual workflow_dispatch against an existing tag)
@@ -78,6 +115,12 @@ jobs:
           # A published (non-draft) release is treated as immutable — we refuse
           # to overwrite it so a retry can't silently mutate what users have
           # already downloaded.
+          ASSETS=(
+            "build/Claudette-${VERSION}.dmg"
+            "build/Claudette-${VERSION}.dmg.sha256"
+            "build/Claudette.app.zip"
+            "build/Claudette.app.zip.sha256"
+          )
           if gh release view "$TAG" >/dev/null 2>&1; then
             IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft)
             if [[ "$IS_DRAFT" != "true" ]]; then
@@ -85,10 +128,7 @@ jobs:
               exit 1
             fi
             echo "Release $TAG already exists as a draft — uploading new assets with --clobber."
-            gh release upload "$TAG" \
-              build/Claudette.app.zip \
-              build/Claudette.app.zip.sha256 \
-              --clobber
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
           else
             echo "Creating fresh draft release $TAG."
             # --draft so a human reviews the notes before making it public.
@@ -97,6 +137,5 @@ jobs:
               --draft \
               --title "$TAG" \
               --generate-notes \
-              build/Claudette.app.zip \
-              build/Claudette.app.zip.sha256
+              "${ASSETS[@]}"
           fi
