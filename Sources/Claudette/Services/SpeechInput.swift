@@ -38,13 +38,18 @@ final class SpeechInput: ObservableObject {
         authError = nil
         partialTranscript = ""
 
-        let speechAuth = await Self.requestSpeechAuthorization()
+        // Read the current TCC state WITHOUT calling `requestAuthorization`.
+        // Prompting is exclusively owned by PermissionsOnboardingView so that
+        // the user never sees an OS dialog mid-conversation. If either grant
+        // is missing here, we fail cleanly and point at Settings — the user
+        // already declined or skipped onboarding.
+        let speechAuth = SFSpeechRecognizer.authorizationStatus()
         guard speechAuth == .authorized else {
             authError = "Speech recognition not authorized. Enable it in System Settings → Privacy & Security → Speech Recognition."
             return
         }
-        let mic = await Self.requestMicrophoneAuthorization()
-        guard mic else {
+        let micAuth = AVCaptureDevice.authorizationStatus(for: .audio)
+        guard micAuth == .authorized else {
             authError = "Microphone access denied. Enable it in System Settings → Privacy & Security → Microphone."
             return
         }
@@ -162,26 +167,8 @@ final class SpeechInput: ObservableObject {
         }
     }
 
-    // MARK: - Permission helpers
-    //
-    // These have to be `nonisolated` — SFSpeechRecognizer / AVCaptureDevice both invoke
-    // their completion handlers on background queues. If the enclosing async function is
-    // MainActor-isolated (which it is by default on a @MainActor class), the Swift 6
-    // executor check traps when the continuation resumes off the main actor.
-
-    nonisolated private static func requestSpeechAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
-        await withCheckedContinuation { cont in
-            SFSpeechRecognizer.requestAuthorization { status in
-                cont.resume(returning: status)
-            }
-        }
-    }
-
-    nonisolated private static func requestMicrophoneAuthorization() async -> Bool {
-        await withCheckedContinuation { cont in
-            AVCaptureDevice.requestAccess(for: .audio) { granted in
-                cont.resume(returning: granted)
-            }
-        }
-    }
+    // The permission-request helpers that used to live here have moved to
+    // PermissionsCoordinator, which owns all prompting up-front. SpeechInput
+    // only READS the current TCC status via authorizationStatus, so it never
+    // fires a system prompt from the middle of a hands-free flow.
 }

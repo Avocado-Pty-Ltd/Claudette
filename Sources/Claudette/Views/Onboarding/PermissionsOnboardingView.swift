@@ -1,5 +1,4 @@
 import SwiftUI
-import AppKit
 
 /// One-time onboarding sheet shown on first launch. Explains what Claudette needs,
 /// what it doesn't, and requests mic + speech in a single flow so the user isn't

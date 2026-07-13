@@ -53,12 +53,17 @@ final class PermissionsCoordinator: ObservableObject {
     }
 
     /// Ask for microphone if the state is `.undetermined`. Returns the final state.
-    /// If already `.granted` / `.denied`, returns immediately without prompting.
+    /// If already decided, returns immediately without prompting.
+    ///
+    /// After the request completes, we re-query `authorizationStatus` rather than
+    /// mapping the boolean `granted` — the boolean collapses `.denied` and
+    /// `.restricted` into the same value, but MDM / parental-controls setups can
+    /// leave the mic in `.restricted`, and the UI should reflect that distinction.
     @discardableResult
     func requestMicrophone() async -> Status {
         if microphone != .undetermined { return microphone }
-        let granted = await Self.requestMic()
-        microphone = granted ? .granted : .denied
+        _ = await Self.requestMic()
+        microphone = Self.mapMicStatus(AVCaptureDevice.authorizationStatus(for: .audio))
         return microphone
     }
 
@@ -66,8 +71,8 @@ final class PermissionsCoordinator: ObservableObject {
     @discardableResult
     func requestSpeech() async -> Status {
         if speech != .undetermined { return speech }
-        let status = await Self.requestSpeechAuthorization()
-        speech = Self.mapSpeechStatus(status)
+        _ = await Self.requestSpeechAuthorization()
+        speech = Self.mapSpeechStatus(SFSpeechRecognizer.authorizationStatus())
         return speech
     }
 
@@ -87,12 +92,15 @@ final class PermissionsCoordinator: ObservableObject {
         UserDefaults.standard.set(true, forKey: Self.onboardingKey)
     }
 
-    /// Whether the onboarding sheet should be shown at launch — either the user
-    /// has never been through it, or a required grant is still `.undetermined`.
+    /// Whether the onboarding sheet should be shown at launch. The gate is a
+    /// single flag: has the user been through onboarding at least once? If they
+    /// clicked "Skip for now" without granting, we deliberately do NOT re-prompt
+    /// on subsequent launches — they can flip permissions in System Settings
+    /// (or via a "Reset onboarding" affordance we haven't shipped yet). This
+    /// matches the "don't re-nag every launch" behaviour promised by
+    /// `hasCompletedOnboarding`.
     var shouldPresentOnboarding: Bool {
         !hasCompletedOnboarding
-            || microphone == .undetermined
-            || speech == .undetermined
     }
 
     // MARK: - Mapping helpers
