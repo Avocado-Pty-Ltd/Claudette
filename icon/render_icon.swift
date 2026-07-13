@@ -1,44 +1,96 @@
-// Standalone Swift script that renders the Claudette app icon to
-// `icon/claudette_1024.png`. Run with:
+// Renders the Claudette "Ember" app icon to `icon/claudette_1024.png`.
+// Run with:
 //
 //     swift icon/render_icon.swift
 //
-// The design: a woman in silhouette with long flowing hair, seated at a
-// warm-glowing computer screen. Warm amber light spills from the screen and
-// picks out her profile — same palette as the app's accent orange (0xC96442).
+// Design: a distilled solar-system tableau. Deep-purple void, three tiny
+// stars, one warm central orb (the agent), a tilted orbit ring, and a small
+// amethyst sub-agent companion sphere. Pixel-spec ported from the Claude
+// Design bundle `Claudette Explorations.dc.html` → element `#1a Ember`.
 
 import AppKit
 import CoreGraphics
 import Foundation
 
-// MARK: - Colour palette
+// MARK: - Design tokens (from Claudette Explorations.dc.html § 1a Ember)
+//
+// The design was drawn at 264×264. Everything below is expressed as a
+// fraction of that so the icon composites correctly at any size.
+struct EmberSpec {
+    // Background — deep purple void with an off-centre core.
+    let bgGradientCentre = CGPoint(x: 0.42, y: 0.58)
+    let bgColorCore     = NSColor(srgbRed: 0x1A/255, green: 0x0F/255, blue: 0x1E/255, alpha: 1)
+    let bgColorMid      = NSColor(srgbRed: 0x0E/255, green: 0x08/255, blue: 0x13/255, alpha: 1)
+    let bgColorEdge     = NSColor(srgbRed: 0x05/255, green: 0x04/255, blue: 0x0A/255, alpha: 1)
 
-extension NSColor {
-    static let bgOuter    = NSColor(srgbRed: 0.055, green: 0.043, blue: 0.075, alpha: 1)
-    static let bgInner    = NSColor(srgbRed: 0.100, green: 0.060, blue: 0.120, alpha: 1)
-    static let ambient    = NSColor(srgbRed: 0.788, green: 0.392, blue: 0.259, alpha: 1)  // 0xC96442
-    static let ambientHot = NSColor(srgbRed: 0.980, green: 0.688, blue: 0.365, alpha: 1)  // warm highlight
-    static let screenHot  = NSColor(srgbRed: 1.000, green: 0.870, blue: 0.720, alpha: 1)  // glass hot spot
-    static let personDark = NSColor(srgbRed: 0.070, green: 0.045, blue: 0.055, alpha: 1)
-    static let rim        = NSColor(srgbRed: 0.980, green: 0.560, blue: 0.290, alpha: 1)
+    // Ambient amber wash from the top-centre where the orb sits.
+    let ambientCentre   = CGPoint(x: 0.50, y: 0.44)
+    let ambientHot      = NSColor(srgbRed: 227/255, green: 138/255, blue: 63/255, alpha: 0.32) // #E38A3F α
+    let ambientMid      = NSColor(srgbRed: 201/255, green: 100/255, blue: 66/255, alpha: 0.10) // #C96442 α
+    let ambientEdge     = NSColor.clear
+    let ambientFalloff  = 0.70   // stop where alpha hits zero
+
+    // Three stars: two cool, one warm. Positions from the design HTML,
+    // measured in the 264 canvas from top-left corner.
+    let stars: [(x: Double, y: Double, r: Double, color: NSColor, opacity: Double)] = [
+        (x: 18.0 + 2, y: 36.0 + 2, r: 2.0,
+         color: NSColor(srgbRed: 1.0, green: 0.910, blue: 0.760, alpha: 1), opacity: 0.70), // #FFE8C2
+        (x: 264.0 - 34 - 1.5, y: 64.0 + 1.5, r: 1.5,
+         color: .white, opacity: 0.50),
+        (x: 52.0 + 1.5, y: 264.0 - 44 - 1.5, r: 1.5,
+         color: .white, opacity: 0.40)
+    ]
+
+    // Central orb (radial gradient inside a 118px sphere at 50%, 44%).
+    let orbCentre         = CGPoint(x: 0.50, y: 0.44)
+    let orbDiameter       = 118.0 // in the 264 canvas
+    // Radial gradient origin sits 33% right and 28% down INSIDE the orb.
+    let orbHighlightOffset = CGPoint(x: 0.33 - 0.5, y: 0.28 - 0.5) // relative to orb centre, in orb diameters
+    let orbCoreHighlight  = NSColor(srgbRed: 0xFF/255, green: 0xE9/255, blue: 0xCB/255, alpha: 1) // #FFE9CB
+    let orbBody           = NSColor(srgbRed: 0xF5/255, green: 0xB3/255, blue: 0x7A/255, alpha: 1) // #F5B37A @26%
+    let orbAccent         = NSColor(srgbRed: 0xC9/255, green: 0x64/255, blue: 0x42/255, alpha: 1) // #C96442 @58%
+    let orbDeep           = NSColor(srgbRed: 0x5A/255, green: 0x24/255, blue: 0x17/255, alpha: 1) // #5A2417 @88%
+    // Outer amber glow behind the orb.
+    let orbHalo           = NSColor(srgbRed: 227/255, green: 138/255, blue: 63/255, alpha: 0.45) // #E38A3F α
+    // Interior shadow bottom-right (design's `inset -10px -14px 26px rgba(0,0,0,.45)`).
+    let orbShadowOffset   = CGPoint(x: -10.0 / 118.0, y: -14.0 / 118.0)
+    let orbShadowColor    = NSColor.black.withAlphaComponent(0.45)
+
+    // Tilted orbit ellipse: 230×76 at 50%, 44% rotated −16°.
+    let orbitWidth        = 230.0
+    let orbitHeight       = 76.0
+    let orbitCentre       = CGPoint(x: 0.50, y: 0.44)
+    let orbitTiltRadians  = -16.0 * .pi / 180.0
+    // Rear half — soft, thin.
+    let orbitRearColor    = NSColor(srgbRed: 246/255, green: 194/255, blue: 154/255, alpha: 0.35)
+    let orbitStroke       = 1.4
+    // Front half — brighter arc that overlays the orb, sold as depth.
+    let orbitFrontColor   = NSColor(srgbRed: 246/255, green: 194/255, blue: 154/255, alpha: 0.55)
+    // In design: clip-path:inset(38px 0 0 0) hides the top 38px of the ellipse.
+    let orbitFrontClipTop = 38.0
+
+    // Sub-agent (amethyst) — 12px sphere offset from orb centre.
+    // Design: left: calc(50% + 96px); top: calc(44% + 28px).
+    let subOffset         = CGPoint(x: 96.0, y: 28.0)  // in 264 units, screen coords
+    let subDiameter       = 12.0
+    let subHighlight      = NSColor(srgbRed: 0xED/255, green: 0xE0/255, blue: 0xFF/255, alpha: 1) // #EDE0FF
+    let subBody           = NSColor(srgbRed: 0xA6/255, green: 0x80/255, blue: 0xE5/255, alpha: 1) // #A680E5 @60%
+    let subDeep           = NSColor(srgbRed: 0x4A/255, green: 0x34/255, blue: 0x68/255, alpha: 1) // #4A3468
+    let subGlow           = NSColor(srgbRed: 166/255, green: 128/255, blue: 229/255, alpha: 0.80)
+    let subGlowRadius     = 12.0
+
+    // Sheen highlight — subtle diagonal top glow across the tile.
+    let sheenAlpha        = 0.07
+    let sheenFalloff      = 0.38  // fade to transparent at 38% down
 }
 
-// MARK: - Convenience shading helpers
-
-func addRadialGradient(in ctx: CGContext, colors: [NSColor], locations: [CGFloat],
-                       start: CGPoint, startR: CGFloat,
-                       end: CGPoint, endR: CGFloat) {
-    let space = CGColorSpaceCreateDeviceRGB()
-    let cgColors = colors.map { $0.cgColor } as CFArray
-    let gradient = CGGradient(colorsSpace: space, colors: cgColors, locations: locations)!
-    ctx.drawRadialGradient(gradient, startCenter: start, startRadius: startR,
-                           endCenter: end, endRadius: endR,
-                           options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
-}
-
-// MARK: - Icon renderer
+// MARK: - Rendering
 
 let size: CGFloat = 1024
+let designCanvas: CGFloat = 264
+/// Everything in the spec is quoted in the 264 canvas, so we scale by this.
+let scale = size / designCanvas
+
 let W = Int(size)
 let H = Int(size)
 
@@ -50,318 +102,220 @@ guard let ctx = CGContext(
     space: CGColorSpaceCreateDeviceRGB(),
     bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
 ) else {
-    fputs("failed to create bitmap context\n", stderr)
-    exit(1)
+    fputs("failed to create bitmap context\n", stderr); exit(1)
 }
 
-// macOS Big-Sur-style rounded-square mask. The system further masks icons but
-// this gives it the correct visual shape at every rendered size.
-let cornerRadius: CGFloat = size * 0.225
-let iconRect = CGRect(x: 0, y: 0, width: size, height: size)
-let iconPath = CGPath(roundedRect: iconRect, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
+// CoreGraphics has origin bottom-left; the design spec uses top-left. Flip
+// the coordinate system so we can transcribe positions directly.
+ctx.translateBy(x: 0, y: size)
+ctx.scaleBy(x: 1, y: -1)
+
+let spec = EmberSpec()
+
+// Squircle mask — 22.35% corner radius matches Apple's macOS icon geometry.
+let cornerRadius = size * (59.0 / designCanvas)
+let iconPath = CGPath(
+    roundedRect: CGRect(x: 0, y: 0, width: size, height: size),
+    cornerWidth: cornerRadius, cornerHeight: cornerRadius,
+    transform: nil
+)
 ctx.saveGState()
 ctx.addPath(iconPath)
 ctx.clip()
 
-// ─── 1. Backdrop ───────────────────────────────────────────────────────────────
-// Radial gradient — deep purple/indigo core fading to nearly-black at the edges.
-addRadialGradient(
-    in: ctx,
-    colors: [NSColor.bgInner, NSColor.bgOuter, NSColor(srgbRed: 0.005, green: 0.005, blue: 0.02, alpha: 1)],
-    locations: [0.0, 0.55, 1.0],
-    start: CGPoint(x: size * 0.42, y: size * 0.55),
+// Helper — draw a radial gradient anchored inside the canvas.
+func radial(centre: CGPoint, startR: CGFloat, endR: CGFloat, stops: [(CGFloat, NSColor)]) {
+    let space = CGColorSpaceCreateDeviceRGB()
+    let colors = stops.map { $0.1.cgColor } as CFArray
+    let locations = stops.map { $0.0 }
+    guard let gradient = CGGradient(colorsSpace: space, colors: colors, locations: locations) else { return }
+    ctx.drawRadialGradient(
+        gradient,
+        startCenter: centre, startRadius: startR,
+        endCenter: centre, endRadius: endR,
+        options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
+    )
+}
+
+// ─── 1. Deep-purple background ──────────────────────────────────────────────
+// Radial gradient with the core down-and-left of centre so the composition
+// has weight where the sub-agent sits.
+radial(
+    centre: CGPoint(x: size * spec.bgGradientCentre.x, y: size * spec.bgGradientCentre.y),
     startR: 0,
-    end: CGPoint(x: size * 0.42, y: size * 0.55),
-    endR: size * 0.85
+    endR: size * 0.75,
+    stops: [
+        (0.00, spec.bgColorCore),
+        (0.55, spec.bgColorMid),
+        (1.00, spec.bgColorEdge)
+    ]
 )
 
-// ─── 2. Warm glow from the screen ─────────────────────────────────────────────
-// Big soft amber halo that spills out from where the screen sits, giving the
-// silhouette its rim-lighting.
-let screenCentre = CGPoint(x: size * 0.68, y: size * 0.48)
-addRadialGradient(
-    in: ctx,
-    colors: [
-        NSColor.ambientHot.withAlphaComponent(0.55),
-        NSColor.ambient.withAlphaComponent(0.28),
-        NSColor.ambient.withAlphaComponent(0.0)
-    ],
-    locations: [0.0, 0.35, 1.0],
-    start: screenCentre, startR: size * 0.02,
-    end:   screenCentre, endR:   size * 0.68
+// ─── 2. Ambient amber wash ─────────────────────────────────────────────────
+// Soft halo from the orb; this is what makes the icon "glow" at a small size.
+radial(
+    centre: CGPoint(x: size * spec.ambientCentre.x, y: size * spec.ambientCentre.y),
+    startR: 0,
+    endR: size * spec.ambientFalloff,
+    stops: [
+        (0.00, spec.ambientHot),
+        (0.42, spec.ambientMid),
+        (1.00, spec.ambientEdge)
+    ]
 )
 
-// ─── 3. The desk / floor plane (very subtle) ──────────────────────────────────
-// A soft horizontal glow along the bottom to ground the composition.
-addRadialGradient(
-    in: ctx,
-    colors: [
-        NSColor.ambient.withAlphaComponent(0.25),
-        NSColor.ambient.withAlphaComponent(0.0)
-    ],
-    locations: [0.0, 1.0],
-    start: CGPoint(x: size * 0.5, y: size * 0.06), startR: 0,
-    end:   CGPoint(x: size * 0.5, y: size * 0.06), endR: size * 0.55
-)
-
-// ─── 4. The computer screen ───────────────────────────────────────────────────
-// A softly-rounded rectangle standing on a thin base ("stand") — this is what
-// throws the warm light onto the woman.
-func drawScreen() {
-    let screenW = size * 0.36
-    let screenH = size * 0.24
-    let cx = size * 0.72
-    let cy = size * 0.50
-    let rect = CGRect(x: cx - screenW / 2, y: cy - screenH / 2,
-                      width: screenW, height: screenH)
-    let radius = size * 0.020
-
-    // Glass surface — hot centre, cooler edges.
-    ctx.saveGState()
-    let path = CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil)
-    ctx.addPath(path)
-    ctx.clip()
-    addRadialGradient(
-        in: ctx,
-        colors: [
-            NSColor.screenHot,
-            NSColor.ambientHot,
-            NSColor.ambient
-        ],
-        locations: [0.0, 0.55, 1.0],
-        start: CGPoint(x: cx - screenW * 0.15, y: cy + screenH * 0.15), startR: 0,
-        end:   CGPoint(x: cx, y: cy), endR: screenW * 0.75
-    )
-    ctx.restoreGState()
-
-    // Thin bezel outline.
-    ctx.saveGState()
-    ctx.addPath(path)
-    ctx.setStrokeColor(NSColor.ambient.withAlphaComponent(0.55).cgColor)
-    ctx.setLineWidth(size * 0.005)
-    ctx.strokePath()
-    ctx.restoreGState()
-
-    // Reflective highlight — a soft diagonal streak on the glass.
-    ctx.saveGState()
-    ctx.addPath(path)
-    ctx.clip()
-    let streak = CGMutablePath()
-    streak.move(to: CGPoint(x: rect.minX - 40, y: rect.maxY + 40))
-    streak.addLine(to: CGPoint(x: rect.minX + rect.width * 0.55, y: rect.maxY + 40))
-    streak.addLine(to: CGPoint(x: rect.minX + rect.width * 0.35, y: rect.minY - 40))
-    streak.addLine(to: CGPoint(x: rect.minX - 40, y: rect.minY - 40))
-    streak.closeSubpath()
-    ctx.addPath(streak)
-    ctx.setFillColor(NSColor.white.withAlphaComponent(0.08).cgColor)
-    ctx.fillPath()
-    ctx.restoreGState()
-
-    // Stand — small trapezoid + base.
-    let standTop = CGPoint(x: cx, y: rect.minY)
-    let standBottomHalf = size * 0.04
-    let standBottomY = rect.minY - size * 0.055
-    let stand = CGMutablePath()
-    stand.move(to: CGPoint(x: standTop.x - size * 0.012, y: standTop.y))
-    stand.addLine(to: CGPoint(x: standTop.x + size * 0.012, y: standTop.y))
-    stand.addLine(to: CGPoint(x: standTop.x + standBottomHalf, y: standBottomY))
-    stand.addLine(to: CGPoint(x: standTop.x - standBottomHalf, y: standBottomY))
-    stand.closeSubpath()
-    ctx.addPath(stand)
-    ctx.setFillColor(NSColor(srgbRed: 0.14, green: 0.09, blue: 0.09, alpha: 1).cgColor)
-    ctx.fillPath()
-
-    // Base bar.
-    let baseRect = CGRect(x: cx - size * 0.11, y: standBottomY - size * 0.014,
-                          width: size * 0.22, height: size * 0.014)
-    let basePath = CGPath(roundedRect: baseRect, cornerWidth: size * 0.007, cornerHeight: size * 0.007, transform: nil)
-    ctx.addPath(basePath)
-    ctx.setFillColor(NSColor(srgbRed: 0.12, green: 0.08, blue: 0.08, alpha: 1).cgColor)
-    ctx.fillPath()
+// ─── 3. Stars (three) ──────────────────────────────────────────────────────
+for star in spec.stars {
+    let cx = star.x * Double(scale)
+    let cy = star.y * Double(scale)
+    let r = star.r * Double(scale)
+    let rect = CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2)
+    ctx.setFillColor(star.color.withAlphaComponent(star.opacity).cgColor)
+    ctx.fillEllipse(in: rect)
 }
-drawScreen()
 
-// ─── 5. The woman's silhouette ────────────────────────────────────────────────
-// Composed from cubic-Bezier curves so the outline reads as flowing hair rather
-// than a stiff polygon. She's viewed in profile from the left, facing right
-// toward the screen, with hair cascading down her back.
-func drawWoman() {
-    let path = CGMutablePath()
+// Utility — draw a rotated ellipse stroke, optionally clipped so only its
+// lower half shows (used for the "front-of-orbit" brighter arc).
+func drawOrbit(clippedFrontOnly: Bool, color: NSColor, strokeWidth: CGFloat) {
+    let cx = size * spec.orbitCentre.x
+    let cy = size * spec.orbitCentre.y
+    let w = CGFloat(spec.orbitWidth) * scale
+    let h = CGFloat(spec.orbitHeight) * scale
 
-    // Reference point — the crown of the head. Positioned so the woman occupies
-    // roughly the left third of the icon with plenty of room for the screen.
-    let crownX = size * 0.30
-    let crownY = size * 0.78
-    let s: CGFloat = size / 1024.0
-
-    // Trace clockwise around the whole silhouette starting at the crown.
-    path.move(to: CGPoint(x: crownX, y: crownY))
-
-    // Forehead — a soft curve down to just above the brow line.
-    path.addCurve(
-        to: CGPoint(x: crownX + 96 * s, y: crownY - 88 * s),
-        control1: CGPoint(x: crownX + 80 * s, y: crownY),
-        control2: CGPoint(x: crownX + 100 * s, y: crownY - 48 * s)
-    )
-    // Brow → nose bridge (subtle inward dip so there's a hint of eye socket).
-    path.addCurve(
-        to: CGPoint(x: crownX + 88 * s, y: crownY - 116 * s),
-        control1: CGPoint(x: crownX + 96 * s, y: crownY - 100 * s),
-        control2: CGPoint(x: crownX + 88 * s, y: crownY - 108 * s)
-    )
-    // Bridge → tip of nose.
-    path.addCurve(
-        to: CGPoint(x: crownX + 130 * s, y: crownY - 158 * s),
-        control1: CGPoint(x: crownX + 106 * s, y: crownY - 128 * s),
-        control2: CGPoint(x: crownX + 128 * s, y: crownY - 142 * s)
-    )
-    // Nose tip → upper lip.
-    path.addCurve(
-        to: CGPoint(x: crownX + 92 * s, y: crownY - 184 * s),
-        control1: CGPoint(x: crownX + 120 * s, y: crownY - 170 * s),
-        control2: CGPoint(x: crownX + 100 * s, y: crownY - 178 * s)
-    )
-    // Lips → chin.
-    path.addCurve(
-        to: CGPoint(x: crownX + 84 * s, y: crownY - 246 * s),
-        control1: CGPoint(x: crownX + 92 * s, y: crownY - 208 * s),
-        control2: CGPoint(x: crownX + 96 * s, y: crownY - 228 * s)
-    )
-    // Chin → jaw underside.
-    path.addCurve(
-        to: CGPoint(x: crownX + 42 * s, y: crownY - 280 * s),
-        control1: CGPoint(x: crownX + 78 * s, y: crownY - 264 * s),
-        control2: CGPoint(x: crownX + 60 * s, y: crownY - 276 * s)
-    )
-    // Neck front (a small concave scoop for the throat).
-    path.addCurve(
-        to: CGPoint(x: crownX + 44 * s, y: crownY - 360 * s),
-        control1: CGPoint(x: crownX + 30 * s, y: crownY - 306 * s),
-        control2: CGPoint(x: crownX + 32 * s, y: crownY - 330 * s)
-    )
-    // Collarbone slope → shoulder.
-    path.addCurve(
-        to: CGPoint(x: crownX + 210 * s, y: crownY - 400 * s),
-        control1: CGPoint(x: crownX + 90 * s, y: crownY - 372 * s),
-        control2: CGPoint(x: crownX + 160 * s, y: crownY - 384 * s)
-    )
-    // Shoulder → upper arm curving down and out toward keyboard.
-    path.addCurve(
-        to: CGPoint(x: crownX + 306 * s, y: crownY - 528 * s),
-        control1: CGPoint(x: crownX + 258 * s, y: crownY - 430 * s),
-        control2: CGPoint(x: crownX + 300 * s, y: crownY - 480 * s)
-    )
-    // Forearm → back to torso side (the arm curves back in — she's reaching
-    // to the keyboard, not fully extended).
-    path.addCurve(
-        to: CGPoint(x: crownX + 168 * s, y: crownY - 610 * s),
-        control1: CGPoint(x: crownX + 300 * s, y: crownY - 580 * s),
-        control2: CGPoint(x: crownX + 240 * s, y: crownY - 606 * s)
-    )
-    // Underside of arm → torso side.
-    path.addCurve(
-        to: CGPoint(x: crownX + 88 * s, y: crownY - 660 * s),
-        control1: CGPoint(x: crownX + 140 * s, y: crownY - 634 * s),
-        control2: CGPoint(x: crownX + 110 * s, y: crownY - 656 * s)
-    )
-    // Waist → cut off at bottom of icon.
-    path.addLine(to: CGPoint(x: crownX + 40 * s, y: crownY - 720 * s))
-    path.addLine(to: CGPoint(x: crownX - 340 * s, y: crownY - 720 * s))
-    // Left side of body / bottom of long hair.
-    path.addCurve(
-        to: CGPoint(x: crownX - 340 * s, y: crownY - 440 * s),
-        control1: CGPoint(x: crownX - 360 * s, y: crownY - 640 * s),
-        control2: CGPoint(x: crownX - 360 * s, y: crownY - 540 * s)
-    )
-    // Big flowing hair curve up the back — the S-shape that gives her the
-    // "long flowing hair" silhouette.
-    path.addCurve(
-        to: CGPoint(x: crownX - 260 * s, y: crownY - 220 * s),
-        control1: CGPoint(x: crownX - 320 * s, y: crownY - 360 * s),
-        control2: CGPoint(x: crownX - 300 * s, y: crownY - 280 * s)
-    )
-    // Hair rising to back of head.
-    path.addCurve(
-        to: CGPoint(x: crownX - 170 * s, y: crownY - 50 * s),
-        control1: CGPoint(x: crownX - 240 * s, y: crownY - 160 * s),
-        control2: CGPoint(x: crownX - 210 * s, y: crownY - 100 * s)
-    )
-    // Back of head → crown (top curve).
-    path.addCurve(
-        to: CGPoint(x: crownX, y: crownY),
-        control1: CGPoint(x: crownX - 150 * s, y: crownY - 20 * s),
-        control2: CGPoint(x: crownX - 70 * s, y: crownY + 8 * s)
-    )
-    path.closeSubpath()
-
-    // Fill — a very dark warm charcoal so the silhouette reads pure black at
-    // small sizes but has warmth up close.
     ctx.saveGState()
-    ctx.addPath(path)
-    ctx.setFillColor(NSColor.personDark.cgColor)
-    ctx.fillPath()
-    ctx.restoreGState()
-
-    // Rim light — draw the silhouette again but offset toward the screen and
-    // clipped to a thin band along the front of the face/body. Uses a warm
-    // amber to simulate the screen light picking out the edge.
-    ctx.saveGState()
-    ctx.addPath(path)
-    ctx.setStrokeColor(NSColor.rim.withAlphaComponent(0.85).cgColor)
-    ctx.setLineWidth(size * 0.006)
-    ctx.setLineJoin(.round)
-    // Only stroke the RIGHT side (facing the screen) by clipping.
-    let rimClip = CGRect(x: crownX - 10, y: 0, width: size, height: size)
-    ctx.clip(to: rimClip)
-    ctx.strokePath()
-    ctx.restoreGState()
-
-    // Hair strand highlights — a couple of soft curved lines catching the light.
-    ctx.saveGState()
-    ctx.setStrokeColor(NSColor.rim.withAlphaComponent(0.28).cgColor)
-    ctx.setLineWidth(size * 0.0035)
+    ctx.translateBy(x: cx, y: cy)
+    ctx.rotate(by: CGFloat(spec.orbitTiltRadians))
+    if clippedFrontOnly {
+        // clip-path:inset(38px 0 0 0) → the top 38 design-units are hidden.
+        // In our translated + rotated space we mask everything above the line
+        // y = -h/2 + 38.
+        let clipTop = -h / 2 + CGFloat(spec.orbitFrontClipTop) * scale
+        ctx.clip(to: CGRect(x: -w, y: clipTop, width: w * 2, height: h))
+    }
+    let ellipseRect = CGRect(x: -w / 2, y: -h / 2, width: w, height: h)
+    ctx.setStrokeColor(color.cgColor)
+    ctx.setLineWidth(CGFloat(strokeWidth) * scale)
     ctx.setLineCap(.round)
-    let strand1 = CGMutablePath()
-    strand1.move(to: CGPoint(x: crownX - 90 * s, y: crownY - 40 * s))
-    strand1.addCurve(
-        to: CGPoint(x: crownX - 210 * s, y: crownY - 400 * s),
-        control1: CGPoint(x: crownX - 150 * s, y: crownY - 160 * s),
-        control2: CGPoint(x: crownX - 220 * s, y: crownY - 260 * s)
-    )
-    ctx.addPath(strand1)
-    ctx.strokePath()
-
-    let strand2 = CGMutablePath()
-    strand2.move(to: CGPoint(x: crownX - 40 * s, y: crownY - 40 * s))
-    strand2.addCurve(
-        to: CGPoint(x: crownX - 140 * s, y: crownY - 500 * s),
-        control1: CGPoint(x: crownX - 90 * s, y: crownY - 180 * s),
-        control2: CGPoint(x: crownX - 170 * s, y: crownY - 340 * s)
-    )
-    ctx.addPath(strand2)
-    ctx.strokePath()
+    ctx.strokeEllipse(in: ellipseRect)
     ctx.restoreGState()
 }
-drawWoman()
 
-// ─── 6. Foreground vignette ──────────────────────────────────────────────────
-// A soft dark ring at the corners of the squircle so the composition doesn't
-// feel evenly-lit — pushes the eye toward the woman and the screen.
-addRadialGradient(
-    in: ctx,
-    colors: [
-        NSColor.black.withAlphaComponent(0.0),
-        NSColor.black.withAlphaComponent(0.0),
-        NSColor.black.withAlphaComponent(0.55)
-    ],
-    locations: [0.0, 0.55, 1.0],
-    start: CGPoint(x: size * 0.5, y: size * 0.5), startR: 0,
-    end:   CGPoint(x: size * 0.5, y: size * 0.5), endR: size * 0.7
+// ─── 4. Rear orbit ring ────────────────────────────────────────────────────
+drawOrbit(clippedFrontOnly: false, color: spec.orbitRearColor, strokeWidth: spec.orbitStroke)
+
+// ─── 5. Central orb ────────────────────────────────────────────────────────
+let orbCx = size * spec.orbCentre.x
+let orbCy = size * spec.orbCentre.y
+let orbR = CGFloat(spec.orbDiameter) * scale / 2
+
+// Halo — a big soft gradient behind the orb.
+radial(
+    centre: CGPoint(x: orbCx, y: orbCy),
+    startR: orbR * 0.55,
+    endR: orbR * 3.1,
+    stops: [
+        (0.00, spec.orbHalo),
+        (1.00, NSColor.clear)
+    ]
 )
+
+// Orb body — clip to a circle and paint the four-stop radial gradient
+// centred at (33%, 28%) inside the sphere for the highlight.
+ctx.saveGState()
+let orbRect = CGRect(x: orbCx - orbR, y: orbCy - orbR, width: orbR * 2, height: orbR * 2)
+ctx.addPath(CGPath(ellipseIn: orbRect, transform: nil))
+ctx.clip()
+
+let orbHighlightCentre = CGPoint(
+    x: orbCx + CGFloat(spec.orbHighlightOffset.x) * orbR * 2,
+    y: orbCy + CGFloat(spec.orbHighlightOffset.y) * orbR * 2
+)
+radial(
+    centre: orbHighlightCentre,
+    startR: 0,
+    endR: orbR * 1.4,
+    stops: [
+        (0.00, spec.orbCoreHighlight),
+        (0.26, spec.orbBody),
+        (0.58, spec.orbAccent),
+        (0.88, spec.orbDeep)
+    ]
+)
+
+// Inner shadow bottom-right — mimics the CSS `inset -10 -14 26 rgba(0,0,0,.45)`.
+let shadowCentre = CGPoint(
+    x: orbCx + CGFloat(spec.orbShadowOffset.x) * orbR * 2,
+    y: orbCy + CGFloat(spec.orbShadowOffset.y) * orbR * 2
+)
+radial(
+    centre: shadowCentre,
+    startR: orbR * 0.55,
+    endR: orbR * 1.15,
+    stops: [
+        (0.00, NSColor.clear),
+        (1.00, spec.orbShadowColor)
+    ]
+)
+ctx.restoreGState()
+
+// ─── 6. Front orbit ring (bright arc in front of the orb) ──────────────────
+drawOrbit(clippedFrontOnly: true, color: spec.orbitFrontColor, strokeWidth: spec.orbitStroke)
+
+// ─── 7. Sub-agent (amethyst) ───────────────────────────────────────────────
+let subCx = orbCx + CGFloat(spec.subOffset.x) * scale
+let subCy = orbCy + CGFloat(spec.subOffset.y) * scale
+let subR = CGFloat(spec.subDiameter) * scale / 2
+
+// Glow behind it.
+radial(
+    centre: CGPoint(x: subCx, y: subCy),
+    startR: subR * 0.6,
+    endR: CGFloat(spec.subGlowRadius) * scale,
+    stops: [
+        (0.00, spec.subGlow),
+        (1.00, NSColor.clear)
+    ]
+)
+
+// Sphere body.
+ctx.saveGState()
+let subRect = CGRect(x: subCx - subR, y: subCy - subR, width: subR * 2, height: subR * 2)
+ctx.addPath(CGPath(ellipseIn: subRect, transform: nil))
+ctx.clip()
+let subHighlightCentre = CGPoint(x: subCx - subR * 0.30, y: subCy - subR * 0.40)
+radial(
+    centre: subHighlightCentre,
+    startR: 0,
+    endR: subR * 1.3,
+    stops: [
+        (0.00, spec.subHighlight),
+        (0.60, spec.subBody),
+        (1.00, spec.subDeep)
+    ]
+)
+ctx.restoreGState()
+
+// ─── 8. Top sheen ──────────────────────────────────────────────────────────
+// Very subtle white gradient across the top of the tile, gone by 38% down.
+// Fakes a glass-sphere reflection so the icon reads as raised at small sizes.
+let sheenSpace = CGColorSpaceCreateDeviceRGB()
+let sheenColors = [
+    NSColor.white.withAlphaComponent(spec.sheenAlpha).cgColor,
+    NSColor.clear.cgColor
+] as CFArray
+let sheenLocations: [CGFloat] = [0.0, CGFloat(spec.sheenFalloff)]
+if let sheen = CGGradient(colorsSpace: sheenSpace, colors: sheenColors, locations: sheenLocations) {
+    ctx.drawLinearGradient(
+        sheen,
+        start: CGPoint(x: 0, y: size),
+        end: CGPoint(x: 0, y: 0),
+        options: [.drawsAfterEndLocation]
+    )
+}
 
 ctx.restoreGState()
 
-// ─── Export ───────────────────────────────────────────────────────────────────
+// ─── Export ─────────────────────────────────────────────────────────────────
 
 guard let cgImage = ctx.makeImage() else {
     fputs("failed to make image\n", stderr); exit(1)
@@ -375,10 +329,6 @@ let outDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
     .appendingPathComponent("icon")
 let outURL = outDir.appendingPathComponent("claudette_1024.png")
 
-// Explicit do/catch so failures surface the underlying error instead of a
-// generic "errors thrown from here are not handled" (top-level `try` compiles
-// in a Swift script but is easy to break by adding a wrapping function later)
-// or being silently swallowed by `try?` on the directory creation.
 do {
     try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
     try pngData.write(to: outURL)

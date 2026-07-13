@@ -23,11 +23,15 @@ struct OrbConversationView: View {
 
     var body: some View {
         GeometryReader { geo in
-            // Big central sphere. The refracted CLI text inside is much more legible
-            // at this scale — small numbers meant the log inside was unreadable.
+            // Central sphere. Diameter capped at 380pt to match the Ember-family
+            // "Observatory" design spec (340pt at 720pt canvas height, +10% for
+            // larger windows). Previously topped out at 520pt which read as
+            // over-scale — the design intent is that the orb sits inside a
+            // starfield with orbital rings visible around it, not that it
+            // dominates the screen.
             let side = min(geo.size.width, geo.size.height)
-            let orbRadius = min(side * 0.24, 260)
-            let center = CGPoint(x: geo.size.width / 2, y: geo.size.height * 0.36)
+            let orbRadius = min(side * 0.24, 190)
+            let center = CGPoint(x: geo.size.width / 2, y: geo.size.height * 0.40)
             // Crawl now spans nearly the full screen — beats rise from just above the
             // bottom HUD all the way up past the orb (which sits IN FRONT of them
             // and occludes as they pass), fading gradually as they approach the top.
@@ -1239,23 +1243,19 @@ private struct HUDLayer: View {
         }
     }
 
+    /// Single-line HUD strip in the bottom-left, matching the Observatory
+    /// design's `ACTIONS 359 · PROJECT EZYBIZ` treatment. Nothing sits in the
+    /// bottom-right corner in the spec.
     private var bottomLeft: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        HStack(spacing: 8) {
             hudLine(k: "ACTIONS", v: "\(actionCount)")
-            hudLine(k: "PROJECT", v: session.project.name)
+            Text("·")
+                .foregroundStyle(Color.white.opacity(0.30))
+            hudLine(k: "PROJECT", v: session.project.name.uppercased())
         }
     }
 
-    private var bottomRight: some View {
-        VStack(alignment: .trailing, spacing: 6) {
-            EnergyMeter(state: state)
-                .frame(width: 120, height: 12)
-            HStack(spacing: 4) {
-                Text("ENERGY")
-                    .tracking(1.2)
-            }
-        }
-    }
+    private var bottomRight: some View { EmptyView() }
 
     private var turnCount: Int {
         session.timeline.reduce(0) { count, item in
@@ -1492,16 +1492,20 @@ private struct SkywardCrawl: View {
     /// it reads over anything behind it.
     @ViewBuilder
     private func liveView(text: String) -> some View {
+        // Observatory spec: italic serif @ 19px, hue-tinted glow (22px shadow at
+        // 45% alpha) layered under a hard black drop shadow. This is the
+        // "current beat" — the thing being said right now, and the design uses
+        // it as the anchor of the bottom-centre.
         Text(text)
-            .font(.system(size: 18, weight: .medium, design: .serif))
+            .font(.system(size: 19, weight: .medium, design: .serif))
+            .italic()
             .foregroundStyle(Color.white)
-            .italic(text.hasSuffix("…"))
             .multilineTextAlignment(.center)
             .lineSpacing(3)
-            .shadow(color: .black.opacity(0.95), radius: 10)
-            .shadow(color: state.hue.opacity(0.5), radius: 12)
+            .shadow(color: .black.opacity(0.95), radius: 12, x: 0, y: 2)
+            .shadow(color: state.hue.opacity(0.45), radius: 22)
             .padding(.horizontal, 20)
-            .frame(maxWidth: 620)
+            .frame(maxWidth: 640)
     }
 }
 
@@ -1513,25 +1517,27 @@ private struct StateChip: View {
     let state: OrbState
 
     var body: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: 8) {
             Circle()
                 .fill(state.hue)
                 .frame(width: 5, height: 5)
                 .shadow(color: state.hue, radius: 5)
             Text(state.description)
-                .font(.system(size: 10, weight: .bold))
-                .tracking(2.2)
+                // Design uses IBM Plex Mono @ 10px; system monospaced is close
+                // enough to the metrics and available without bundling a font.
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .tracking(2.4)  // letter-spacing:.24em
                 .foregroundStyle(state.hue.opacity(0.95))
                 .textCase(.uppercase)
         }
-        .padding(.horizontal, 11)
+        .padding(.horizontal, 14)
         .padding(.vertical, 5)
         .background(
             Capsule(style: .continuous)
-                .fill(Color.black.opacity(0.35))
+                .fill(Color.black.opacity(0.40))
                 .overlay(
                     Capsule(style: .continuous)
-                        .stroke(state.hue.opacity(0.4), lineWidth: 0.6)
+                        .stroke(state.hue.opacity(0.45), lineWidth: 1)
                 )
         )
     }
