@@ -88,6 +88,13 @@ struct OrbConversationView: View {
                     rawLog: session.rawLog
                 )
                     .frame(width: orbRadius * 2, height: orbRadius * 2)
+                    // Explicit hit target — the sphere content lives inside a
+                    // GeometryReader and its visible pixels don't reach the
+                    // frame edges (soft halos, transparent corners). Without
+                    // this, .gesture and .focusable would only fire on the
+                    // visibly-painted parts and press-to-talk feels dead in
+                    // large swaths of what looks like the orb.
+                    .contentShape(Rectangle())
                     .position(center)
                     .gesture(pressGesture)
                     .focusable(true)
