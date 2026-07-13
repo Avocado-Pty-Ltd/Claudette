@@ -156,6 +156,9 @@ struct OrbConversationView: View {
                 // ── 10. Foreground UI ─────────────────────────────────────────
                 VStack {
                     topBar
+                    if let err = speechInput.authError, !err.isEmpty {
+                        authErrorBanner(err)
+                    }
                     Spacer()
                 }
 
@@ -262,6 +265,36 @@ struct OrbConversationView: View {
     }
 
     // MARK: - Foreground UI
+
+    /// Red pill shown at the top of the orb view when SpeechInput can't start.
+    /// Without this, permission failures were silent — the user pressed the orb,
+    /// nothing happened, no indication why. This surfaces the actual TCC error
+    /// so they can fix it in System Settings.
+    private func authErrorBanner(_ message: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 11, weight: .semibold))
+            Text(message)
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+        }
+        .foregroundStyle(Color.white)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(
+            Capsule(style: .continuous)
+                .fill(DiffLine.removedRed.opacity(0.85))
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
+                )
+        )
+        .shadow(color: .black.opacity(0.5), radius: 8, y: 2)
+        .padding(.top, 6)
+        .padding(.horizontal, 22)
+        .frame(maxWidth: 640, alignment: .center)
+    }
 
     private var topBar: some View {
         HStack {
@@ -391,9 +424,21 @@ struct OrbConversationView: View {
     private func startPressing() {
         guard !isPressing else { return }
         isPressing = true
+        NSLog("Claudette orb: startPressing() fired")
         if speechOutput.isSpeaking { speechOutput.stop() }
         if !speechInput.isListening {
-            Task { await speechInput.start() }
+            Task {
+                await speechInput.start()
+                if let err = speechInput.authError {
+                    NSLog("Claudette orb: speechInput.start failed → %@", err)
+                } else if speechInput.isListening {
+                    NSLog("Claudette orb: speechInput now listening")
+                } else {
+                    NSLog("Claudette orb: speechInput.start returned with no authError but isListening=false")
+                }
+            }
+        } else {
+            NSLog("Claudette orb: speechInput was already listening")
         }
     }
 
@@ -401,6 +446,7 @@ struct OrbConversationView: View {
         guard isPressing else { return }
         isPressing = false
         let text = speechInput.partialTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        NSLog("Claudette orb: endPressing() fired, text length=%d", text.count)
         speechInput.stop()
         guard !text.isEmpty else { return }
         // Hard interrupt: if Claude is still churning through the previous turn,
