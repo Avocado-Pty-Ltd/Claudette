@@ -1,37 +1,47 @@
 # Releasing Claudette
 
-Releases are cut by pushing a `v*` tag. A GitHub Actions workflow does the rest.
+Two ways to cut a release. Pick whichever feels less friction.
 
-## Cut a release
+## 1. One-click bump (Actions UI)
+
+Go to **Actions → Release → Run workflow** and pick:
+
+- **patch** — bugfix / hygiene / no user-facing change
+- **minor** — new features, backwards-compatible
+- **major** — breaking changes
+
+The workflow reads the latest existing `vX.Y.Z` tag, bumps the requested component, creates the new tag at the current `main` HEAD, and runs the build. No terminal round-trip.
+
+```
+Latest tag       Bump      New tag
+v0.1.0     +     patch  →  v0.1.1
+v0.1.0     +     minor  →  v0.2.0
+v0.1.0     +     major  →  v1.0.0
+```
+
+If no `vX.Y.Z` tag exists yet, the first bump lands at `v0.1.0` as a bootstrap.
+
+## 2. Terminal tag push
 
 ```bash
-# 1. Make sure main is clean and tests / builds pass locally
 git checkout main
 git pull
-./build.sh              # sanity check — should exit 0
-
-# 2. Bump versions in Info.plist if this is a user-facing release:
-#    - CFBundleShortVersionString  (e.g. 0.2.0 — the marketing version)
-#    - CFBundleVersion             (e.g. 5      — a monotonically-increasing build number)
-# Commit + push. Since main requires a PR, do this via a small versioning PR.
-
-# 3. Tag and push
 git tag v0.2.0 -m "Claudette 0.2.0"
 git push origin v0.2.0
 ```
 
-## What happens next
+The `push: tags: ['v*']` trigger fires the same build. Handy if you want to tag a specific historical commit (`git tag v0.2.0 abcd1234`) instead of `main` HEAD.
 
-The `.github/workflows/release.yml` workflow triggers on any `v*` tag push. On a fresh `macos-14` runner it:
+## What the workflow does
 
-1. Checks out the tagged commit.
-2. Runs `./build.sh` — Swift build + `.app` bundle assembly + ad-hoc code sign.
-3. Zips `build/Claudette.app` with `ditto` (preserves resource forks and xattrs — plain `zip` breaks macOS bundle signatures).
-4. Generates a SHA256 checksum.
-5. Creates a **draft** release named after the tag, with:
-   - Auto-generated notes based on commits since the last tag (edit these before publishing).
-   - `Claudette.app.zip` attached.
-   - `Claudette.app.zip.sha256` attached.
+On a fresh `macos-15` runner (Xcode 16 / Swift 6):
+
+1. Resolves / creates the tag (see above).
+2. Checks out the tagged commit.
+3. `./build.sh` → `build/Claudette.app` (SwiftPM build + `.app` assembly + ad-hoc code sign).
+4. Zips with `ditto` — preserves resource forks / xattrs / signature. Plain `zip` corrupts macOS bundle signatures.
+5. `shasum -a 256` sidecar for the zip.
+6. Creates a **draft** GitHub Release named after the tag, with auto-generated notes from commits since the last tag. Attaches `Claudette.app.zip` + `Claudette.app.zip.sha256`.
 
 ## Publish
 
@@ -39,12 +49,12 @@ The `.github/workflows/release.yml` workflow triggers on any `v*` tag push. On a
 2. Rewrite the auto-notes into human-readable highlights (three lines is often enough).
 3. Click **Publish release**.
 
-## Re-run against an existing tag
+## Re-run a flaky build
 
-If a release build fails (flaky runner, network hiccup, etc.), go to Actions → Release → Run workflow, and enter the tag name (e.g. `v0.2.0`). The workflow is idempotent:
+If a build fails (runner flake, brew mirror hiccup, etc.):
 
-- If **no release exists** for the tag, a fresh draft is created.
-- If a **draft release** already exists, its assets are replaced in-place with `gh release upload --clobber` — auto-generated notes are preserved so you don't lose any edits you'd started.
+- Actions → the failed run → **Re-run failed jobs** (top-right). It picks up the same tag and re-runs against it.
+- If a **draft release** already exists for the tag, its assets get replaced in-place with `gh release upload --clobber` — the notes you'd started editing are preserved.
 - If the release has already been **published**, the workflow refuses to overwrite it (published artifacts are treated as immutable — users may already have downloaded them). Either delete / un-publish it manually, or push a new tag with a fix.
 
 ## Notarization (future)
