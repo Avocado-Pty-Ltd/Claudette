@@ -491,29 +491,21 @@ enum OrbState: Equatable {
 private struct DeepSpaceBackdrop: View {
     let state: OrbState
 
+    // Observatory spec: linear-gradient(180deg, #02030A 0%, #090612 55%, #0E0A18 100%).
+    // The state tint isn't in the backdrop — it rides the nebulae. Previously
+    // this view added a state-hued radial gradient over the top; that made the
+    // whole scene shift colour on every state change, which is louder than the
+    // spec intends.
     var body: some View {
-        ZStack {
-            LinearGradient(
-                gradient: Gradient(colors: [
-                    Color(hex: 0x02030A),
-                    Color(hex: 0x090612),
-                    Color(hex: 0x0E0A18)
-                ]),
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            RadialGradient(
-                gradient: Gradient(colors: [
-                    state.hue.opacity(0.18),
-                    state.hue.opacity(0.05),
-                    .clear
-                ]),
-                center: .center,
-                startRadius: 60,
-                endRadius: 700
-            )
-            .animation(.easeInOut(duration: 1.6), value: state)
-        }
+        LinearGradient(
+            gradient: Gradient(stops: [
+                .init(color: Color(hex: 0x02030A), location: 0.00),
+                .init(color: Color(hex: 0x090612), location: 0.55),
+                .init(color: Color(hex: 0x0E0A18), location: 1.00)
+            ]),
+            startPoint: .top,
+            endPoint: .bottom
+        )
         .ignoresSafeArea()
     }
 }
@@ -527,27 +519,43 @@ private struct NebulaField: View {
     let focus: CGPoint
 
     var body: some View {
-        TimelineView(.animation) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            ZStack {
-                nebula(index: 0, t: t, color: state.hue,     radius: 320, opacity: 0.30)
-                nebula(index: 1, t: t, color: state.accent,  radius: 260, opacity: 0.24)
-                nebula(index: 2, t: t, color: Color(hex: 0x6B3EAE), radius: 220, opacity: 0.20)
-                nebula(index: 3, t: t, color: Color(hex: 0x2A6A9B), radius: 200, opacity: 0.18)
-            }
-        }
-    }
+        // Observatory spec: exactly two nebulae.
+        //   Left/top:   520×520 at left:24% top:14%, background = state.hue,
+        //               opacity .13, blur 90, drift1 26s
+        //   Right/mid:  420×420 at right:8% top:34%, background = #6B3EAE,
+        //               opacity .10, blur 90, drift2 32s
+        // The state hue rides the left nebula; the amethyst on the right is
+        // fixed so the scene keeps a compositional anchor across states.
+        GeometryReader { geo in
+            let w = geo.size.width
+            let h = geo.size.height
+            TimelineView(.animation) { context in
+                let t = context.date.timeIntervalSinceReferenceDate
+                // drift1: 120px right, 40px up
+                let dx1 = 120 * sin(t * (2 * .pi / 26))
+                let dy1 = -40 * sin(t * (2 * .pi / 26))
+                // drift2: 100px left, 50px down
+                let dx2 = -100 * sin(t * (2 * .pi / 32))
+                let dy2 =  50 * sin(t * (2 * .pi / 32))
 
-    private func nebula(index: Int, t: Double, color: Color, radius: CGFloat, opacity: Double) -> some View {
-        let seed = Double(index) * 2.7
-        let dx = cos(t * (0.06 + Double(index) * 0.02) + seed) * 220
-        let dy = sin(t * (0.05 + Double(index) * 0.017) + seed * 1.3) * 120
-        return Circle()
-            .fill(color)
-            .frame(width: radius * 2, height: radius * 2)
-            .blur(radius: 90)
-            .opacity(opacity)
-            .position(x: focus.x + dx, y: focus.y + dy)
+                ZStack(alignment: .topLeading) {
+                    Circle()
+                        .fill(state.hue)
+                        .frame(width: 520, height: 520)
+                        .blur(radius: 90)
+                        .opacity(0.13)
+                        .offset(x: w * 0.24 + CGFloat(dx1), y: h * 0.14 + CGFloat(dy1))
+                        .animation(.easeInOut(duration: 1.2), value: state)
+                    Circle()
+                        .fill(Color(hex: 0x6B3EAE))
+                        .frame(width: 420, height: 420)
+                        .blur(radius: 90)
+                        .opacity(0.10)
+                        .offset(x: w * 0.92 - CGFloat(420) + CGFloat(dx2), y: h * 0.34 + CGFloat(dy2))
+                }
+            }
+            .allowsHitTesting(false)
+        }
     }
 }
 
@@ -617,43 +625,22 @@ private struct OrbitalPlanes: View {
     let radius: CGFloat
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            ZStack {
-                ring(t: t, radiusMul: 1.85, tilt: 0.35, thickness: 0.6, speed: 0.05, opacity: 0.20)
-                ring(t: t, radiusMul: 2.30, tilt: 0.50, thickness: 0.5, speed: -0.04, opacity: 0.14)
-                ring(t: t, radiusMul: 2.85, tilt: 0.28, thickness: 0.4, speed: 0.03, opacity: 0.10)
-            }
-            .position(center)
-        }
-    }
-
-    /// A single tilted ring drawn with a rotating tangential highlight so it feels
-    /// like a real orbit and not a static ellipse.
-    private func ring(t: Double, radiusMul: CGFloat, tilt: CGFloat, thickness: CGFloat,
-                      speed: Double, opacity: Double) -> some View {
-        let rx = radius * radiusMul
-        let ry = rx * tilt
-        let sweep = Angle.radians(t * speed * 2 * .pi)
-        return ZStack {
+        // Observatory spec: two subtle plain rings at −9° and −4°, sized as
+        // fractions of the design canvas (860×300 and 1080×420 within 1180×720),
+        // with only a very faint white stroke — no chase arcs, no motion.
+        // Motion comes from the nebulae + processing ring + sub-agents; the
+        // orbital planes are just "here's where things travel".
+        ZStack {
             Ellipse()
-                .stroke(state.hue.opacity(opacity), lineWidth: thickness)
-                .frame(width: rx * 2, height: ry * 2)
-            // Bright arc that sweeps around the ring, giving it motion.
+                .stroke(Color.white.opacity(0.07), lineWidth: 1)
+                .frame(width: radius * 4.30, height: radius * 1.50)
+                .rotationEffect(.degrees(-9))
             Ellipse()
-                .trim(from: 0.0, to: 0.18)
-                .stroke(
-                    LinearGradient(
-                        colors: [.clear, state.accent.opacity(0.9), state.accent.opacity(0.0)],
-                        startPoint: .leading, endPoint: .trailing
-                    ),
-                    style: StrokeStyle(lineWidth: thickness + 1.5, lineCap: .round)
-                )
-                .rotationEffect(sweep)
-                .frame(width: rx * 2, height: ry * 2)
-                .blur(radius: 1.2)
+                .stroke(Color.white.opacity(0.045), lineWidth: 1)
+                .frame(width: radius * 5.40, height: radius * 2.10)
+                .rotationEffect(.degrees(-4))
         }
-        .compositingGroup()
+        .position(center)
     }
 }
 
@@ -810,192 +797,138 @@ private struct OrbSphere: View {
     let rawLog: String
 
     var body: some View {
+        // Layer stack tightened to the Observatory spec:
+        //   1. Nebula halo behind the sphere (soft hue bleed).
+        //   2. Sphere body — single radial gradient (accent → hue → dark → black).
+        //   3. Refraction log inside (masked to inner disk).
+        //   4. Top-left specular highlight (radial white, screen blend).
+        //   5. Bottom-right deep shadow (radial black).
+        //   6. Rim highlight (thin white inset ring at top).
+        //   7. Central bright core (30pt white blur).
+        //
+        // Notes on what was removed vs the previous implementation: plasma
+        // blobs, extra pulsing halos, warm-glow bleed, sub-halo ring, and the
+        // dilating iris. The design carries all its life through the nebulae,
+        // ripples, processing ring, and sub-agents around the orb — not
+        // inside it.
         TimelineView(.animation) { context in
             let t = context.date.timeIntervalSinceReferenceDate
-            let breathing = 1.0 + 0.03 * sin(t * 1.2)
-            let pulse = 0.5 + 0.5 * sin(t * 2.4)
+            let breathing = 1.0 + 0.028 * sin(t * (2 * .pi / 5.2))  // breathe 5.2s
 
-            ZStack {
-                // Outer glow — a wide soft aura.
-                Circle()
-                    .fill(state.hue)
-                    .opacity(state == .idle ? 0.14 : 0.28)
-                    .blur(radius: 80)
-                    .scaleEffect(1.6 * breathing)
+            GeometryReader { g in
+                let s = min(g.size.width, g.size.height)
+                ZStack {
+                    // ── 1. Nebula halo — soft hue bleed behind the sphere ─
+                    // Design's `radial-gradient(circle, hue 0%, transparent 62%)`
+                    // with opacity .22 and blur 50px, on a 560px canvas
+                    // vs 340px orb (≈ 1.65× overscan).
+                    Circle()
+                        .fill(state.hue)
+                        .frame(width: s * 1.65, height: s * 1.65)
+                        .opacity(0.22)
+                        .blur(radius: 50)
 
-                // Warm inner glow bleed.
-                Circle()
-                    .fill(state.accent)
-                    .opacity(0.20)
-                    .blur(radius: 40)
-                    .scaleEffect(1.15)
-
-                // Halos — thin rings that pulse outward when speaking or listening.
-                Circle()
-                    .stroke(state.hue.opacity(0.6), lineWidth: 1.2)
-                    .scaleEffect(haloScale(t: t, phase: 0))
-                    .opacity(haloOpacity(t: t, phase: 0))
-                Circle()
-                    .stroke(state.accent.opacity(0.4), lineWidth: 0.8)
-                    .scaleEffect(haloScale(t: t, phase: 0.5))
-                    .opacity(haloOpacity(t: t, phase: 0.5) * 0.6)
-
-                // Plasma sphere body + refracted CLI ticker inside.
-                GeometryReader { g in
-                    let size = min(g.size.width, g.size.height)
+                    // ── 2. Sphere body + interior log ─────────────────────
                     ZStack {
-                        Canvas { ctx, canvasSize in
-                            Self.drawPlasma(context: &ctx, size: canvasSize, t: t, state: state, level: level)
-                        }
-                        .frame(width: size, height: size)
+                        // Base fill — spec's radial gradient at (34%, 28%):
+                        // accent 0% → hue 38% → #140A10 78% → #05030A 100%.
+                        Circle()
+                            .fill(
+                                RadialGradient(
+                                    colors: [
+                                        state.accent,
+                                        state.hue,
+                                        Color(hex: 0x140A10),
+                                        Color(hex: 0x05030A)
+                                    ],
+                                    center: UnitPoint(x: 0.34, y: 0.28),
+                                    startRadius: 0,
+                                    endRadius: s * 0.62
+                                )
+                            )
 
-                        // Raw Claude Code stdout, refracted through a virtual glass
-                        // lens. Sits ON TOP of the plasma so you can read it, but
-                        // BELOW the rim/specular/shadow overlays so the highlights
-                        // still sell the "3D sphere" illusion.
+                        // Refracted CLI log — masked to inner disk so the
+                        // text doesn't touch the sphere edge. Design mask:
+                        // radial(circle, #000 55%, transparent 78%).
                         RefractionText(rawLog: rawLog, state: state)
-                            .frame(width: size, height: size)
+                            .frame(width: s, height: s)
+                            .mask(
+                                RadialGradient(
+                                    colors: [.black, .black, .clear],
+                                    center: .center,
+                                    startRadius: 0,
+                                    endRadius: s * 0.42
+                                )
+                            )
                             .opacity(0.85)
                             .blendMode(.screen)
                     }
+                    .frame(width: s, height: s)
                     .clipShape(Circle())
                     .overlay(
-                        // Rim light — bright arc on the top-left, subtle glow all around.
+                        // ── 3. Specular highlight top-left ─────────────
+                        Circle()
+                            .fill(
+                                RadialGradient(
+                                    colors: [
+                                        Color.white.opacity(0.75),
+                                        .clear
+                                    ],
+                                    center: UnitPoint(x: 0.33, y: 0.27),
+                                    startRadius: 0,
+                                    endRadius: s * 0.30
+                                )
+                            )
+                            .blendMode(.screen)
+                    )
+                    .overlay(
+                        // ── 4. Deep shadow bottom-right ─────────────────
+                        Circle()
+                            .fill(
+                                RadialGradient(
+                                    colors: [
+                                        .clear,
+                                        Color.black.opacity(0.65)
+                                    ],
+                                    center: UnitPoint(x: 0.72, y: 0.80),
+                                    startRadius: s * 0.40,
+                                    endRadius: s * 0.80
+                                )
+                            )
+                    )
+                    .overlay(
+                        // ── 5. Thin rim highlight ──────────────────────
+                        // Design uses `box-shadow: inset 0 1.5px 0 rgba(255,255,255,.4)`.
+                        // A stroked circle with a linear top-heavy gradient
+                        // approximates the highlight at the very top edge.
                         Circle()
                             .strokeBorder(
                                 LinearGradient(
-                                    colors: [Color.white.opacity(0.55), state.accent.opacity(0.15), .clear],
-                                    startPoint: .topLeading, endPoint: .bottomTrailing
+                                    colors: [
+                                        Color.white.opacity(0.40),
+                                        .clear
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .center
                                 ),
-                                lineWidth: 1.6
+                                lineWidth: 1.5
                             )
                     )
-                    .overlay(
-                        // Specular highlight — small bright spot on the top-left.
-                        Circle()
-                            .fill(
-                                RadialGradient(
-                                    colors: [Color.white.opacity(0.9), .clear],
-                                    center: UnitPoint(x: 0.32, y: 0.28),
-                                    startRadius: 2, endRadius: size * 0.28
-                                )
-                            )
-                            .blendMode(.plusLighter)
-                            .opacity(0.85)
-                    )
-                    .overlay(
-                        // Deep shadow on the far side — anchors the orb visually.
-                        Circle()
-                            .fill(
-                                RadialGradient(
-                                    colors: [.clear, .clear, Color.black.opacity(0.65)],
-                                    center: UnitPoint(x: 0.72, y: 0.78),
-                                    startRadius: size * 0.15, endRadius: size * 0.55
-                                )
-                            )
-                    )
+
+                    // ── 6. Central bright core ────────────────────────────
+                    // Design: 30×30 rgba(255,255,255,.7) with blur(9px).
+                    // At 340pt canvas that's ≈8.8% of diameter.
+                    Circle()
+                        .fill(Color.white.opacity(0.70))
+                        .frame(width: s * 0.088, height: s * 0.088)
+                        .blur(radius: s * 0.026)
                 }
+                .frame(width: s, height: s)
                 .scaleEffect(isPressing ? 0.94 : breathing)
                 .animation(.easeInOut(duration: 0.18), value: isPressing)
-
-                // Iris — a bright core that dilates with the state.
-                Circle()
-                    .fill(Color.white.opacity(state == .listening ? 0.85 : 0.55))
-                    .frame(width: irisSize(t: t), height: irisSize(t: t))
-                    .blur(radius: 8)
-                    .blendMode(.plusLighter)
-
-                // Sub-halo — very faint ring right at the orb boundary, always on.
-                Circle()
-                    .stroke(state.accent.opacity(0.35), lineWidth: 0.5)
-                    .scaleEffect(1.02 + 0.02 * pulse)
+                .compositingGroup()
+                .shadow(color: Color.black.opacity(0.6), radius: s * 0.26, x: 0, y: 0)
             }
-            .compositingGroup()
-            .shadow(color: state.hue.opacity(0.55), radius: 40, x: 0, y: 0)
-        }
-    }
-
-    /// Draws several drifting colored circles inside the orb — the "plasma" that
-    /// makes it feel alive and volumetric. Clipped to a circle by the parent.
-    private static func drawPlasma(context: inout GraphicsContext, size: CGSize, t: Double,
-                                   state: OrbState, level: Double) {
-        let w = size.width
-        let h = size.height
-        let cx = w / 2
-        let cy = h / 2
-        let R = min(w, h) / 2
-
-        // Base fill — dark inner colour to give plasma something to sit on top of.
-        context.fill(
-            Path(ellipseIn: CGRect(origin: .zero, size: size)),
-            with: .radialGradient(
-                Gradient(colors: [
-                    state.accent.opacity(0.9),
-                    state.hue.opacity(0.75),
-                    state.hue.opacity(0.35),
-                    Color.black.opacity(0.75)
-                ]),
-                center: CGPoint(x: cx - R * 0.15, y: cy - R * 0.20),
-                startRadius: 2,
-                endRadius: R * 1.15
-            )
-        )
-
-        // Six drifting "plasma" blobs — soft colored circles that orbit inside the sphere.
-        let blobCount = 6
-        for i in 0..<blobCount {
-            let phase = Double(i) * (2 * .pi / Double(blobCount))
-            let orbitR = R * (0.30 + 0.15 * sin(t * 0.7 + phase))
-            let angle = t * (0.35 + Double(i) * 0.05) + phase
-            let x = cx + cos(angle) * orbitR
-            let y = cy + sin(angle * 1.1) * orbitR * 0.85
-            let blobR = R * (0.55 + 0.12 * sin(t * 1.3 + phase))
-            let color: Color = (i % 2 == 0) ? state.hue : state.accent
-            let opacity = 0.28 + 0.18 * level
-
-            context.fill(
-                Path(ellipseIn: CGRect(x: x - blobR, y: y - blobR, width: blobR * 2, height: blobR * 2)),
-                with: .radialGradient(
-                    Gradient(colors: [color.opacity(opacity), .clear]),
-                    center: CGPoint(x: x, y: y),
-                    startRadius: 0,
-                    endRadius: blobR
-                )
-            )
-        }
-    }
-
-    private func haloScale(t: Double, phase: Double) -> CGFloat {
-        let period: Double
-        switch state {
-        case .listening: period = 1.4
-        case .speaking:  period = 0.9
-        case .thinking, .interpreting: period = 2.2
-        case .idle:      period = 4.0
-        }
-        let cycle = (t + phase).truncatingRemainder(dividingBy: period) / period
-        return 1.02 + 0.30 * CGFloat(cycle)
-    }
-
-    private func haloOpacity(t: Double, phase: Double) -> Double {
-        switch state {
-        case .listening, .speaking:
-            let period = state == .speaking ? 0.9 : 1.4
-            let cycle = (t + phase).truncatingRemainder(dividingBy: period) / period
-            return 0.75 * (1 - cycle)
-        case .thinking, .interpreting:
-            return 0.35 + 0.15 * sin(t * 2.1 + phase)
-        case .idle:
-            return 0.24
-        }
-    }
-
-    private func irisSize(t: Double) -> CGFloat {
-        switch state {
-        case .listening: return 42 + 10 * CGFloat(sin(t * 2.4))
-        case .thinking, .interpreting: return 22 + 5 * CGFloat(sin(t * 3.4))
-        case .speaking: return 30 + 12 * CGFloat(sin(t * 6.0))
-        case .idle: return 24 + 3 * CGFloat(sin(t * 0.9))
         }
     }
 }
@@ -1327,15 +1260,26 @@ private struct EnergyMeter: View {
 // MARK: - Vignette
 
 private struct VignetteOverlay: View {
+    // Observatory spec:
+    //   radial-gradient(ellipse at 50% 42%, transparent 55%, rgba(0,0,0,.5) 100%)
+    // SwiftUI has no ellipse-shaped RadialGradient, so we approximate with a
+    // circular gradient centred slightly above centre and let the multiply
+    // blend do the darkening. The 42% Y anchor matches the spec exactly.
     var body: some View {
-        RadialGradient(
-            gradient: Gradient(colors: [.clear, .clear, Color.black.opacity(0.55)]),
-            center: .center,
-            startRadius: 220,
-            endRadius: 700
-        )
+        GeometryReader { geo in
+            RadialGradient(
+                gradient: Gradient(stops: [
+                    .init(color: .clear, location: 0.00),
+                    .init(color: .clear, location: 0.55),
+                    .init(color: Color.black.opacity(0.5), location: 1.00)
+                ]),
+                center: UnitPoint(x: 0.5, y: 0.42),
+                startRadius: 0,
+                endRadius: max(geo.size.width, geo.size.height) * 0.65
+            )
+        }
         .ignoresSafeArea()
-        .blendMode(.multiply)
+        .allowsHitTesting(false)
     }
 }
 
@@ -1554,65 +1498,37 @@ private struct ProcessingRing: View {
     let orbRadius: CGFloat
 
     var body: some View {
+        // Observatory spec:
+        //   conic-gradient(from 0deg, transparent 0-62%, accent 92%, transparent 100%)
+        //   masked to a thin band via
+        //   radial-gradient(circle, transparent 66%, #000 67-69%, transparent 70%)
+        //   spinning CW at 2.8s per revolution.
+        // Only visible during thinking / interpreting.
         TimelineView(.animation(minimumInterval: 1.0 / 45.0)) { context in
             let t = context.date.timeIntervalSinceReferenceDate
             let visible = (state == .thinking || state == .interpreting)
-            let ringR = orbRadius * 1.32
+            let ringD = orbRadius * 2.6   // canvas 440 vs orb 340 → 1.294; scaled up here for balance
+            let rotation = Angle.radians(t * (2 * .pi / 2.8))
 
-            Canvas { ctx, _ in
-                guard visible else { return }
-                let rotation = t * (state == .thinking ? 1.6 : 1.2)
-                let dashes = 42
-                for i in 0..<dashes {
-                    let base = Double(i) / Double(dashes) * (2 * .pi)
-                    let angle = base
-                    // Bright ridge that sweeps around — the "chase" band.
-                    let ridge = (base - rotation).truncatingRemainder(dividingBy: 2 * .pi)
-                    let ridgeNorm = ridge < 0 ? ridge + 2 * .pi : ridge
-                    // Convert to 0..1 distance from the ridge head.
-                    let d = ridgeNorm / (2 * .pi)
-                    let brightness = pow(1 - d, 3.5)      // sharp fall-off
-                    let alpha = 0.12 + brightness * 0.85
-
-                    let x = center.x + cos(angle) * ringR
-                    let y = center.y + sin(angle) * ringR
-                    let dashLen: CGFloat = 6 + CGFloat(brightness) * 4
-                    let dashW: CGFloat = 1.6 + CGFloat(brightness) * 1.8
-
-                    // Draw a small arc dash — rotated to tangent.
-                    let tangent = angle + .pi / 2
-                    let x1 = x - cos(tangent) * dashLen / 2
-                    let y1 = y - sin(tangent) * dashLen / 2
-                    let x2 = x + cos(tangent) * dashLen / 2
-                    let y2 = y + sin(tangent) * dashLen / 2
-
-                    var p = Path()
-                    p.move(to: CGPoint(x: x1, y: y1))
-                    p.addLine(to: CGPoint(x: x2, y: y2))
-                    ctx.stroke(
-                        p,
-                        with: .color(state.accent.opacity(alpha)),
-                        style: StrokeStyle(lineWidth: dashW, lineCap: .round)
-                    )
-                }
-
-                // Add an inner counter-rotating faint ring for depth.
-                let innerR = orbRadius * 1.18
-                let innerDashes = 60
-                let innerRotation = -t * 0.9
-                for i in 0..<innerDashes {
-                    let base = Double(i) / Double(innerDashes) * (2 * .pi)
-                    let ridge = (base - innerRotation).truncatingRemainder(dividingBy: 2 * .pi)
-                    let ridgeNorm = ridge < 0 ? ridge + 2 * .pi : ridge
-                    let d = ridgeNorm / (2 * .pi)
-                    let brightness = pow(1 - d, 5.0)
-                    let alpha = 0.05 + brightness * 0.35
-                    let x = center.x + cos(base) * innerR
-                    let y = center.y + sin(base) * innerR
-                    let dot = CGRect(x: x - 1.4, y: y - 1.4, width: 2.8, height: 2.8)
-                    ctx.fill(Path(ellipseIn: dot), with: .color(state.hue.opacity(alpha)))
-                }
-            }
+            AngularGradient(
+                gradient: Gradient(stops: [
+                    .init(color: .clear,       location: 0.00),
+                    .init(color: .clear,       location: 0.62),
+                    .init(color: state.accent, location: 0.92),
+                    .init(color: .clear,       location: 1.00)
+                ]),
+                center: .center
+            )
+            .frame(width: ringD, height: ringD)
+            .mask(
+                Circle()
+                    .stroke(Color.black, lineWidth: ringD * 0.03)
+                    .frame(width: ringD * 0.68, height: ringD * 0.68)
+            )
+            .rotationEffect(rotation)
+            .position(center)
+            .opacity(visible ? 1 : 0)
+            .animation(.easeInOut(duration: 0.8), value: visible)
         }
     }
 }
@@ -1628,13 +1544,40 @@ private struct SubagentField: View {
     let orbRadius: CGFloat
     let state: OrbState
 
-    /// Small palette used to give concurrent sub-agents visually distinct hues.
-    private static let palette: [Color] = [
-        Color(hex: 0xE5A25A), // amber
-        Color(hex: 0xA680E5), // purple
-        Color(hex: 0x64D9AF), // aurora green
-        Color(hex: 0x5AC8E5), // cyan
-        Color(hex: 0xE85A9B)  // pink
+    /// Observatory spec has two sub-agents visible in the thinking state:
+    ///   • Amethyst — 46px, orbit at ~1.75× orbRadius, spinning CW at 11s.
+    ///   • Green    — 36px, orbit at ~2.08× orbRadius, spinning CCW at 15s.
+    ///
+    /// Rather than hard-coding two decorative slots, we use these two orbits
+    /// as slots for the FIRST two live sub-agents from `session.subagents`.
+    /// Sub-agents past the second get cycled through the same slots so the
+    /// scene still reads as design intent when work is exceptionally busy.
+    private struct OrbitSlot {
+        let radius: CGFloat       // multiplier of orbRadius
+        let sizeFrac: CGFloat     // multiplier of orbRadius diameter
+        let period: Double        // seconds per revolution; negative = CCW
+        let startAngle: Double    // radians
+        let highlight: Color
+        let body: Color
+        let deep: Color
+    }
+    private static let slots: [OrbitSlot] = [
+        // Amethyst — atan2(-14, 298) starting angle
+        OrbitSlot(
+            radius: 1.75, sizeFrac: 0.135, period: 11,
+            startAngle: atan2(-14.0, 298.0),
+            highlight: Color(hex: 0xEDE0FF),
+            body: Color(hex: 0xA680E5),
+            deep: Color(hex: 0x241536)
+        ),
+        // Green — atan2(40, -352) starting angle (roughly π)
+        OrbitSlot(
+            radius: 2.08, sizeFrac: 0.106, period: -15,
+            startAngle: atan2(40.0, -352.0),
+            highlight: Color(hex: 0xD9FFF0),
+            body: Color(hex: 0x64D9AF),
+            deep: Color(hex: 0x10321F)
+        )
     ]
 
     var body: some View {
@@ -1643,114 +1586,88 @@ private struct SubagentField: View {
             let t = now.timeIntervalSinceReferenceDate
             ZStack {
                 ForEach(Array(subagents.enumerated()), id: \.element.id) { idx, sub in
-                    let age = now.timeIntervalSince(sub.startedAt)
-                    // Spring-out animation: from centre to orbit radius over 0.6 s.
-                    let spawnT = min(1.0, age / 0.6)
-                    let orbitR = orbRadius * 0.20 + (orbRadius * 1.70 - orbRadius * 0.20) * easeOutBack(spawnT)
-                    // Orbit angle drifts, and each sub-agent has a different phase.
-                    let phase = Double(idx) * (2 * .pi / Double(max(subagents.count, 1)))
-                    let angle = phase + t * 0.55
-                    // Fade in during spawn, fade out after completion.
+                    let slot = Self.slots[idx % Self.slots.count]
+                    // Angle drifts at the slot's period (positive = CW).
+                    let angle = slot.startAngle + t * (2 * .pi / slot.period)
+                    let orbitR = orbRadius * slot.radius
+                    let x = center.x + cos(angle) * orbitR
+                    let y = center.y + sin(angle) * orbitR
+                    let diameter = orbRadius * 2 * slot.sizeFrac
+                    // Opacity: fade in over 0.4s on spawn, fade out over 1.8s on
+                    // completion. Nothing else — the design shows subagents at
+                    // full presence, not springing in.
                     let opacity: Double = {
                         if let done = sub.completedAt {
                             let doneAge = now.timeIntervalSince(done)
                             return max(0, 1 - doneAge / 1.8)
                         }
+                        let age = now.timeIntervalSince(sub.startedAt)
                         return min(1, age / 0.4)
                     }()
-                    // Reel back toward the parent orb while dissolving.
-                    let reelR: CGFloat = {
-                        guard let done = sub.completedAt else { return orbitR }
-                        let doneAge = now.timeIntervalSince(done)
-                        let f = CGFloat(min(1, doneAge / 1.8))
-                        return orbitR * (1 - f) + orbRadius * 0.30 * f
-                    }()
 
-                    let x = center.x + cos(angle) * reelR
-                    let y = center.y + sin(angle) * reelR
-                    let subR = orbRadius * 0.16 + orbRadius * 0.03 * CGFloat(sin(t * 3 + phase))
-                    let hue = Self.palette[sub.hueSeed % Self.palette.count]
-
-                    SubagentSphere(size: subR * 2, hue: hue, status: sub.status, t: t)
-                        .opacity(opacity)
-                        .position(x: x, y: y)
+                    SubagentSphere(
+                        size: diameter,
+                        highlight: slot.highlight,
+                        bodyColor: slot.body,
+                        deep: slot.deep,
+                        status: sub.status
+                    )
+                    .opacity(opacity)
+                    .position(x: x, y: y)
                 }
             }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(subagents.isEmpty ? "" : "\(subagents.count) sub-agent\(subagents.count == 1 ? "" : "s") running")
     }
-
-    /// Easing that overshoots slightly at the end — reads as a "pop" rather than a
-    /// smooth glide, so the birth of each subagent has weight.
-    private func easeOutBack(_ x: Double) -> CGFloat {
-        let c1 = 1.70158
-        let c3 = c1 + 1
-        let n = x - 1
-        return CGFloat(1 + c3 * n * n * n + c1 * n * n)
-    }
 }
 
-/// A miniature version of the main orb — plasma-lit sphere with its own halo. Tints
-/// red once the sub-agent has completed with an error.
+/// Miniature version of the main orb — matches Observatory spec:
+///   background: radial-gradient(circle at 35% 30%, highlight, body 55%, deep 92%)
+///   box-shadow: 0 0 26–30px rgba(body,.55–.60)
+///
+/// Both design sub-agents share this recipe; the palette (highlight / body /
+/// deep) is chosen by the parent based on which orbit slot the sub-agent is
+/// filling.
 private struct SubagentSphere: View {
     let size: CGFloat
-    let hue: Color
+    let highlight: Color
+    let bodyColor: Color
+    let deep: Color
     let status: ClaudeChatSession.SubagentState.Status
-    let t: Double
 
     var body: some View {
-        let tint: Color = {
-            switch status {
-            case .running: return hue
-            case .success: return hue
-            case .error:   return DiffLine.removedRed
-            }
-        }()
-        ZStack {
-            // Outer glow.
-            Circle()
-                .fill(tint)
-                .frame(width: size * 2.4, height: size * 2.4)
-                .blur(radius: 22)
-                .opacity(0.5)
+        // On error we tint the body layer red so the sphere reads as failed
+        // without dropping the highlight/deep sandwich from the design.
+        let effectiveBody = status == .error ? DiffLine.removedRed : bodyColor
+        let effectiveDeep = status == .error
+            ? DiffLine.removedRed.opacity(0.35)
+            : deep
 
-            // Sphere body — same recipe as the main orb but simplified.
+        ZStack {
+            // Outer amethyst/green glow (design box-shadow).
+            Circle()
+                .fill(effectiveBody)
+                .frame(width: size * 1.7, height: size * 1.7)
+                .blur(radius: size * 0.45)
+                .opacity(0.55)
+
+            // Sphere body — radial gradient centred at (35%, 30%) inside.
             Circle()
                 .fill(
                     RadialGradient(
-                        colors: [
-                            Color.white.opacity(0.9),
-                            tint.opacity(0.85),
-                            tint.opacity(0.4),
-                            Color.black.opacity(0.75)
-                        ],
+                        gradient: Gradient(stops: [
+                            .init(color: highlight,       location: 0.00),
+                            .init(color: effectiveBody,   location: 0.55),
+                            .init(color: effectiveDeep,   location: 0.92)
+                        ]),
                         center: UnitPoint(x: 0.35, y: 0.30),
-                        startRadius: 1,
-                        endRadius: size * 0.7
+                        startRadius: 0,
+                        endRadius: size * 0.6
                     )
                 )
                 .frame(width: size, height: size)
-                .overlay(
-                    Circle()
-                        .strokeBorder(Color.white.opacity(0.35), lineWidth: 0.8)
-                )
-                .shadow(color: tint.opacity(0.7), radius: 12)
-
-            // Running pulse — a subtle expanding ring while working.
-            if status == .running {
-                Circle()
-                    .stroke(tint.opacity(0.8 * (1 - pulse)), lineWidth: 1)
-                    .frame(width: size * (1 + pulse * 0.9),
-                           height: size * (1 + pulse * 0.9))
-            }
         }
-    }
-
-    private var pulse: CGFloat {
-        let period = 1.4
-        let cycle = t.truncatingRemainder(dividingBy: period) / period
-        return CGFloat(cycle)
     }
 }
 
@@ -1763,16 +1680,20 @@ private struct TodoPanel: View {
     let state: OrbState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
+        // Same glass panel as MonitorPanel, matching Observatory spec exactly.
+        // Plan rows use 12.5px text (rounded to 13 in SwiftUI): completed items
+        // are struck through and dimmed, in-progress is bold, pending is
+        // mid-opacity white.
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 7) {
                 Circle()
                     .fill(state.hue)
                     .frame(width: 4, height: 4)
-                    .shadow(color: state.hue, radius: 4)
+                    .shadow(color: state.hue, radius: 6)
                 Text("PLAN")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .tracking(2.0)
-                    .foregroundStyle(Color.white.opacity(0.55))
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .tracking(2.4)
+                    .foregroundStyle(Color.white.opacity(0.50))
                 Spacer(minLength: 0)
                 Text("\(doneCount)/\(todos.count)")
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
@@ -1787,17 +1708,20 @@ private struct TodoPanel: View {
                     .foregroundStyle(Color.white.opacity(0.4))
             }
         }
-        .padding(12)
-        .frame(width: 260, alignment: .leading)
+        .padding(EdgeInsets(top: 14, leading: 16, bottom: 14, trailing: 16))
+        .frame(width: 240, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color.black.opacity(0.55))
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(hex: 0x08060E).opacity(0.6))
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.white.opacity(0.10), lineWidth: 0.6)
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
                 )
         )
-        .shadow(color: .black.opacity(0.6), radius: 16, y: 4)
     }
 
     private func row(_ todo: TodoEntry) -> some View {
@@ -1846,16 +1770,21 @@ private struct MonitorPanel: View {
     let state: OrbState
 
     var body: some View {
+        // Observatory spec: rounded-14 glass panel, rgba(8,6,14,.6) fill,
+        // rgba(255,255,255,.08) border, backdrop blur 12px. Header uses a 4px
+        // hue-glow dot + mono 9px @ .24em tracking label + accent-tinted meta
+        // on the right ("OK"). Command line: mono 11px accent. Output: mono
+        // 10px white α.55 with line-height 1.6.
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
+            HStack(spacing: 7) {
                 Circle()
                     .fill(dotColor)
                     .frame(width: 4, height: 4)
-                    .shadow(color: dotColor, radius: 4)
+                    .shadow(color: dotColor, radius: 6)
                 Text("MONITOR")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .tracking(2.0)
-                    .foregroundStyle(Color.white.opacity(0.55))
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .tracking(2.4)
+                    .foregroundStyle(Color.white.opacity(0.50))
                 Spacer(minLength: 0)
                 Text(statusLabel)
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
@@ -1863,27 +1792,34 @@ private struct MonitorPanel: View {
             }
             if let cmd = event.command?.trimmingCharacters(in: .whitespacesAndNewlines), !cmd.isEmpty {
                 Text("$ " + cmd)
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
                     .foregroundStyle(state.accent)
                     .lineLimit(2)
                     .truncationMode(.middle)
             }
             Text(outputPreview)
                 .font(.system(size: 10, weight: .regular, design: .monospaced))
-                .foregroundStyle(Color.white.opacity(0.7))
+                .foregroundStyle(Color.white.opacity(0.55))
+                .lineSpacing(3)  // ≈ 1.6 line-height on 10px
                 .lineLimit(6)
         }
-        .padding(12)
-        .frame(width: 280, alignment: .leading)
+        .padding(EdgeInsets(top: 14, leading: 16, bottom: 14, trailing: 16))
+        .frame(width: 264, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color.black.opacity(0.65))
+            // Design uses backdrop-filter:blur(12px). SwiftUI's .materials
+            // (.ultraThinMaterial) is the closest native equivalent — same
+            // frosted-glass effect over the scene behind it.
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(hex: 0x08060E).opacity(0.6))
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.white.opacity(0.10), lineWidth: 0.6)
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
                 )
         )
-        .shadow(color: .black.opacity(0.6), radius: 16, y: 4)
     }
 
     private var statusLabel: String {
