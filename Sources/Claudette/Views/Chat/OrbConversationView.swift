@@ -202,9 +202,13 @@ struct OrbConversationView: View {
             // Sync fullscreen state with the current window in case orb mode is
             // entered while the window is already fullscreen.
             isFullscreen = currentWindow()?.styleMask.contains(.fullScreen) ?? false
-            // Re-query TCC — the coordinator's cached values might be stale
-            // from an earlier launch or a Settings toggle.
-            permissions.refresh()
+            // Reconcile TCC. `forceReconcile` calls `requestAuthorization` on
+            // both frameworks — a no-op prompt when state is already decided,
+            // but the crucial trigger that flushes a stale process cache when
+            // the user has toggled the permission in Settings against a prior
+            // build's code signature. Idempotent, safe to fire on every entry
+            // into orb mode.
+            Task { await permissions.forceReconcile() }
             announce("Conversation mode. Hold any key to speak.")
         }
         .onDisappear {
@@ -217,9 +221,11 @@ struct OrbConversationView: View {
             isFullscreen = false
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            // User just came back from System Settings — re-query TCC so the
-            // banner disappears if they granted the permission.
-            permissions.refresh()
+            // User just came back from System Settings — reconcile TCC so the
+            // banner disappears if they granted the permission. Uses the same
+            // requestAuthorization-flush trick as onAppear because a bare
+            // authorizationStatus() read still returns the process cache.
+            Task { await permissions.forceReconcile() }
         }
         .onChange(of: orbState) { _, new in
             if new != lastAnnouncedState {
@@ -293,14 +299,21 @@ struct OrbConversationView: View {
     }
 
     /// Red pill shown at the top of the orb view when a permission is missing.
-    /// Tap opens the right System Settings pane so the user can flip the
-    /// permission in two clicks instead of hunting through nested menus.
-    /// Also re-queries TCC on tap — if the user already granted but the cached
-    /// state is stale, tapping the banner refreshes it and it disappears.
+    /// Tap first tries `forceReconcile` — which calls `requestAuthorization` on
+    /// both frameworks. If the user already granted in Settings but our
+    /// process cache is stale (the common case for ad-hoc-signed builds where
+    /// the code signature changes on every rebuild), that call returns
+    /// `.authorized` immediately and the banner disappears with no round-trip
+    /// through Settings. Only if the permission is STILL missing after the
+    /// reconcile does the deep-link to the right Privacy pane fire.
     private func authErrorBanner(_ message: String) -> some View {
         Button(action: {
-            permissions.refresh()
-            openPrivacyPane(for: message)
+            Task {
+                await permissions.forceReconcile()
+                if missingPermissionMessage != nil {
+                    openPrivacyPane(for: message)
+                }
+            }
         }) {
             HStack(spacing: 10) {
                 Image(systemName: "exclamationmark.triangle.fill")

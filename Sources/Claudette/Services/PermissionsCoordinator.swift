@@ -82,6 +82,18 @@ final class PermissionsCoordinator: ObservableObject {
         return speech
     }
 
+    /// Force both requests unconditionally and re-query afterwards. Used from
+    /// the auth-error banner tap: if the user has already granted permission
+    /// in System Settings but the process's cached TCC binding is stale
+    /// (common for ad-hoc-signed apps where the code-signature changes on
+    /// every rebuild), calling `requestAuthorization` reconciles it — the
+    /// OS returns `.authorized` immediately without a prompt.
+    func forceReconcile() async {
+        _ = await Self.requestSpeechAuthorization()
+        _ = await Self.requestMic()
+        refresh()
+    }
+
     /// Runs both requests sequentially. Called by the onboarding sheet's
     /// primary button — the user sees mic prompt → speech prompt back-to-back,
     /// once, and the sheet dismisses.
