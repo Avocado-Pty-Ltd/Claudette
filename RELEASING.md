@@ -41,7 +41,11 @@ The `.github/workflows/release.yml` workflow triggers on any `v*` tag push. On a
 
 ## Re-run against an existing tag
 
-If a release build fails (flaky runner, network hiccup, etc.), go to Actions → Release → Run workflow, and enter the tag name (e.g. `v0.2.0`). The workflow is idempotent:
+If a release build fails (flaky runner, network hiccup, etc.), go to Actions → Release → Run workflow, and enter the tag name (e.g. `v0.2.0`).
+
+The workflow **checks that the tag exists** before doing anything else. If you fat-finger the input, the run fails immediately with an error listing the tags that do exist — no mysterious retry-loop on `git fetch`.
+
+If the tag does exist, the workflow is idempotent:
 
 - If **no release exists** for the tag, a fresh draft is created.
 - If a **draft release** already exists, its assets are replaced in-place with `gh release upload --clobber` — auto-generated notes are preserved so you don't lose any edits you'd started.

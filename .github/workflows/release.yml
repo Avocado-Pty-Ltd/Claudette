@@ -35,6 +35,25 @@ jobs:
             echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           fi
 
+      # Preflight: make sure the tag actually exists on origin before we hand
+      # it to actions/checkout. Without this step, a typo in the manual
+      # workflow_dispatch input (or a workflow re-run against a tag that never
+      # got pushed) produces a mysterious three-retry `git fetch` failure with
+      # no hint that the tag is the problem. Failing here surfaces a clean
+      # error message and lists the tags that DO exist as suggestions.
+      - name: Verify tag exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.tag.outputs.name }}"
+          if ! gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error title=Tag not found::Tag '$TAG' does not exist on origin. Push it first:  git tag $TAG -m '...' && git push origin $TAG"
+            echo ""
+            echo "Existing tags (most recent first):"
+            gh api "repos/${GITHUB_REPOSITORY}/tags" --jq '.[].name' | head -20 || true
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.tag.outputs.name }}
