@@ -9,6 +9,7 @@ final class VoiceConfig: ObservableObject {
     private static let ttsEnabledKey = "voice.ttsEnabled"
     private static let speedKey = "voice.speed"
     private static let useAppleVoiceKey = "voice.useAppleVoice"
+    private static let appleVoiceIdKey = "voice.appleVoiceIdentifier"
 
     /// How fast the narration is played back. 1.0 = normal, 1.5 = 50% faster.
     /// Applied via `AVAudioPlayer.rate` (ElevenLabs) or `AVSpeechUtterance.rate`
@@ -48,6 +49,13 @@ final class VoiceConfig: ObservableObject {
     @Published var useAppleVoice: Bool {
         didSet { UserDefaults.standard.set(useAppleVoice, forKey: Self.useAppleVoiceKey) }
     }
+    /// Chosen `AVSpeechSynthesisVoice.identifier`. Empty string = system default
+    /// (whatever `AVSpeechSynthesisVoice(language:)` returns). Set from the
+    /// picker in Settings so the user can trade up from the drab default voice
+    /// to the Enhanced / Premium voices already installed on their Mac.
+    @Published var appleVoiceIdentifier: String {
+        didSet { UserDefaults.standard.set(appleVoiceIdentifier, forKey: Self.appleVoiceIdKey) }
+    }
 
     init() {
         self.apiKey = KeychainStore.get(Self.apiKeyName) ?? ""
@@ -58,6 +66,7 @@ final class VoiceConfig: ObservableObject {
         // UserDefaults returns 0 for a missing double, so treat that as "use default".
         self.speed = stored > 0 ? stored : Self.defaultSpeed
         self.useAppleVoice = UserDefaults.standard.bool(forKey: Self.useAppleVoiceKey)
+        self.appleVoiceIdentifier = UserDefaults.standard.string(forKey: Self.appleVoiceIdKey) ?? ""
     }
 
     /// Whether a real ElevenLabs voice can be synthesised — API key + voice ID set.
