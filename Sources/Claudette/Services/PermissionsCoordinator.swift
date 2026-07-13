@@ -48,8 +48,14 @@ final class PermissionsCoordinator: ObservableObject {
     /// Re-query the system for the current TCC state without prompting. Called
     /// on init and whenever we suspect the user may have flipped a setting.
     func refresh() {
-        microphone = Self.mapMicStatus(AVCaptureDevice.authorizationStatus(for: .audio))
-        speech = Self.mapSpeechStatus(SFSpeechRecognizer.authorizationStatus())
+        let rawMic = AVCaptureDevice.authorizationStatus(for: .audio)
+        let rawSpeech = SFSpeechRecognizer.authorizationStatus()
+        microphone = Self.mapMicStatus(rawMic)
+        speech = Self.mapSpeechStatus(rawSpeech)
+        NSLog("Claudette perms: bundleId=%@ rawMic=%d rawSpeech=%d → mic=%@ speech=%@",
+              Bundle.main.bundleIdentifier ?? "?",
+              rawMic.rawValue, rawSpeech.rawValue,
+              String(describing: microphone), String(describing: speech))
     }
 
     /// Ask for microphone if the state is `.undetermined`. Returns the final state.

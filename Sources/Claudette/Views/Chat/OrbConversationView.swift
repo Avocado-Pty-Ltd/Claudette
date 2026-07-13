@@ -202,6 +202,9 @@ struct OrbConversationView: View {
             // Sync fullscreen state with the current window in case orb mode is
             // entered while the window is already fullscreen.
             isFullscreen = currentWindow()?.styleMask.contains(.fullScreen) ?? false
+            // Re-query TCC — the coordinator's cached values might be stale
+            // from an earlier launch or a Settings toggle.
+            permissions.refresh()
             announce("Conversation mode. Hold any key to speak.")
         }
         .onDisappear {
@@ -292,8 +295,13 @@ struct OrbConversationView: View {
     /// Red pill shown at the top of the orb view when a permission is missing.
     /// Tap opens the right System Settings pane so the user can flip the
     /// permission in two clicks instead of hunting through nested menus.
+    /// Also re-queries TCC on tap — if the user already granted but the cached
+    /// state is stale, tapping the banner refreshes it and it disappears.
     private func authErrorBanner(_ message: String) -> some View {
-        Button(action: { openPrivacyPane(for: message) }) {
+        Button(action: {
+            permissions.refresh()
+            openPrivacyPane(for: message)
+        }) {
             HStack(spacing: 10) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 12, weight: .semibold))
