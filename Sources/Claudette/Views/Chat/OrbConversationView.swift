@@ -12,6 +12,9 @@ struct OrbConversationView: View {
     @ObservedObject var session: ClaudeChatSession
     @ObservedObject var speechInput: SpeechInput
     @ObservedObject var speechOutput: SpeechOutput
+    /// Live TCC state — refreshed on app activation so the banner auto-clears
+    /// once the user grants a permission in System Settings and comes back.
+    @EnvironmentObject var permissions: PermissionsCoordinator
     let onExit: () -> Void
 
     @State private var isPressing: Bool = false
@@ -156,8 +159,8 @@ struct OrbConversationView: View {
                 // ── 10. Foreground UI ─────────────────────────────────────────
                 VStack {
                     topBar
-                    if let err = speechInput.authError, !err.isEmpty {
-                        authErrorBanner(err)
+                    if let missing = missingPermissionMessage {
+                        authErrorBanner(missing)
                     }
                     Spacer()
                 }
@@ -209,6 +212,11 @@ struct OrbConversationView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in
             isFullscreen = false
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // User just came back from System Settings — re-query TCC so the
+            // banner disappears if they granted the permission.
+            permissions.refresh()
         }
         .onChange(of: orbState) { _, new in
             if new != lastAnnouncedState {
@@ -266,7 +274,22 @@ struct OrbConversationView: View {
 
     // MARK: - Foreground UI
 
-    /// Red pill shown at the top of the orb view when SpeechInput can't start.
+    /// Which permission (if any) is currently blocking press-to-talk, expressed
+    /// as a user-facing message. Reads from `PermissionsCoordinator` so it
+    /// reflects the LIVE TCC state, not the stale `SpeechInput.authError`
+    /// which only updates on the next start() call. When both are granted this
+    /// returns nil and the banner disappears.
+    private var missingPermissionMessage: String? {
+        if !permissions.speech.isGranted {
+            return "Speech recognition not authorized. Enable it in System Settings → Privacy & Security → Speech Recognition."
+        }
+        if !permissions.microphone.isGranted {
+            return "Microphone access denied. Enable it in System Settings → Privacy & Security → Microphone."
+        }
+        return nil
+    }
+
+    /// Red pill shown at the top of the orb view when a permission is missing.
     /// Tap opens the right System Settings pane so the user can flip the
     /// permission in two clicks instead of hunting through nested menus.
     private func authErrorBanner(_ message: String) -> some View {
