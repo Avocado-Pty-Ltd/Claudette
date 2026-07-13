@@ -3,8 +3,10 @@ import AppKit
 
 struct ContentView: View {
     @EnvironmentObject var store: ProjectStore
+    @EnvironmentObject var permissions: PermissionsCoordinator
     @State private var columnVisibility: NavigationSplitViewVisibility = .doubleColumn
     @State private var showingSettings = false
+    @State private var showingOnboarding = false
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -18,11 +20,20 @@ struct ContentView: View {
         .sheet(isPresented: $showingSettings) {
             SettingsView()
         }
+        .sheet(isPresented: $showingOnboarding) {
+            PermissionsOnboardingView()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .claudetteShowSettings)) { _ in
             showingSettings = true
         }
         .onAppear {
             configureAppearance()
+            // Show the onboarding sheet up-front (rather than triggering permission
+            // prompts mid-flow inside SpeechInput). Guarded by shouldPresentOnboarding
+            // so it doesn't reappear after the user has been through it once.
+            if permissions.shouldPresentOnboarding {
+                showingOnboarding = true
+            }
         }
     }
 
