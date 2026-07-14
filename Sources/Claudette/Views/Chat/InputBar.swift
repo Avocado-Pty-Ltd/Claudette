@@ -121,9 +121,13 @@ struct InputBar: View {
     /// Map a file URL's extension to a MIME type that Anthropic's messages API
     /// accepts. Returns nil for non-image extensions so unrelated drops (a .swift
     /// file, a .txt) are silently ignored rather than sent as broken images.
-    /// Static so it can be called from the NSItemProvider completion (which
-    /// runs on a background queue) without hopping to the MainActor.
-    private static func mediaType(for url: URL) -> String? {
+    ///
+    /// `nonisolated` because it's called from the NSItemProvider completion
+    /// handler, which runs on a background queue. Without it, Swift 6 infers
+    /// MainActor isolation from the enclosing View — locally that surfaced as
+    /// a warning; the release build under CI treats it as an error and the
+    /// job failed on the first release cut after PR #12 merged.
+    nonisolated private static func mediaType(for url: URL) -> String? {
         switch url.pathExtension.lowercased() {
         case "png":               return "image/png"
         case "jpg", "jpeg":       return "image/jpeg"
