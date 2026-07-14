@@ -84,6 +84,13 @@ final class ClaudeChatSession: ObservableObject {
     /// Backstops the interpreter so a hung Haiku call doesn't leave the orb silent.
     private var interpretationTimeoutTask: Task<Void, Never>?
 
+    /// In-flight tool-use permission prompts, keyed by the CLI's request_id.
+    /// While non-empty, the next user message is intercepted by `send()` and
+    /// routed through `answerPermission` rather than sent to the CLI as a new
+    /// user turn — Claude is blocked waiting on our control_response, so a
+    /// fresh user message would deadlock the wire.
+    private var pendingPermissions: [String: PendingPermission.ID] = [:]
+
     init(project: Project) {
         self.project = project
         self.cwdDisplay = project.displayPath
@@ -102,6 +109,16 @@ final class ClaudeChatSession: ObservableObject {
         // Slash commands are handled natively by Claudette, not forwarded to the CLI.
         if trimmed.hasPrefix("/") {
             handleSlashCommand(trimmed)
+            return
+        }
+
+        // If Claude is blocked on a permission prompt, this message is the answer
+        // to that prompt — route it through the control_response wire instead of
+        // opening a new user turn. Otherwise the CLI would deadlock (it's still
+        // reading for a control_response on the same request_id) and the user's
+        // reply would sit in stdin ignored.
+        if let firstPending = pendingPermissions.first {
+            answerPermission(requestId: firstPending.key, userText: prompt)
             return
         }
 
@@ -548,9 +565,213 @@ final class ClaudeChatSession: ObservableObject {
             handlePartialEvent(obj)
         case "result":
             handleResultEvent(obj)
+        case "control_request":
+            handleControlRequest(obj)
         default:
             NSLog("Claudette: unknown event type '\(type)'")
         }
+    }
+
+    // MARK: - Permission-prompt wire (control_request / control_response)
+    //
+    // Claude Code emits `control_request` whenever the model wants to use a
+    // tool that isn't blanket-allowed by the current --permission-mode (Bash
+    // and WebFetch are the common ones). The CLI blocks reading stdin for the
+    // matching `control_response` before making the tool call, so we MUST
+    // respond eventually or the turn deadlocks and Claude "loses the plot"
+    // — hallucinating tool results or drifting off-topic.
+    //
+    // We turn each request into a conversational card in the timeline and
+    // route the user's next utterance through `answerPermission`, rather
+    // than showing a modal Allow/Deny dialog. That keeps the voice-first
+    // flow intact ("May I run firebase deploy?" → user says "yeah").
+
+    /// Parse a control_request event and turn it into a PendingPermission
+    /// timeline card. Only `subtype: "can_use_tool"` is meaningfully surfaced
+    /// today — anything else we auto-allow (Claude Code has other subtypes for
+    /// its own internal signalling that don't want user attention).
+    private func handleControlRequest(_ obj: [String: Any]) {
+        guard let requestId = obj["request_id"] as? String,
+              let request = obj["request"] as? [String: Any],
+              let subtype = request["subtype"] as? String else {
+            NSLog("Claudette: malformed control_request: %@", String(describing: obj))
+            return
+        }
+        guard subtype == "can_use_tool" else {
+            // Auto-ack any subtype we don't understand so the CLI doesn't stall.
+            // Interrupt requests and similar are typically transparent to users.
+            sendControlResponse(requestId: requestId, behavior: .allow)
+            return
+        }
+        let toolName = (request["tool_name"] as? String) ?? "the tool"
+        let input = (request["input"] as? [String: Any]) ?? [:]
+
+        let summary = Self.summarize(toolName: toolName, input: input)
+        let inputJSON = Self.prettyPrintJSON(input)
+        let prompt = Self.composePermissionPrompt(toolName: toolName, summary: summary)
+
+        let pending = PendingPermission(
+            requestId: requestId,
+            toolName: toolName,
+            summary: summary,
+            inputJSON: inputJSON,
+            prompt: prompt
+        )
+        timeline.append(TimelineItem(kind: .pendingPermission(pending)))
+        pendingPermissions[requestId] = pending.id
+
+        // Surface the ask into the voice channel too so orb mode isn't silent
+        // while the user stares at a paused sphere.
+        liveNarration = prompt
+
+        // Claude is no longer "thinking" while waiting on the user — flip the
+        // orb / activity indicator off so the UX reflects "your move".
+        isRunning = false
+        activeAction = nil
+        appendToPrettyLog("? \(prompt)\n")
+    }
+
+    /// The user has typed / spoken a response while a permission was pending.
+    /// Classify their intent, update the pending card, and forward the
+    /// verdict as a control_response so Claude can resume.
+    private func answerPermission(requestId: String, userText: String) {
+        // Show the user's answer in the timeline like a normal message, so the
+        // pending card + response read as a natural conversation exchange.
+        timeline.append(TimelineItem(kind: .userText(userText)))
+
+        let intent = Self.classifyPermissionIntent(userText)
+        switch intent {
+        case .allow:
+            sendControlResponse(requestId: requestId, behavior: .allow)
+            updatePendingPermission(requestId: requestId) { p in
+                p.status = .allowed
+            }
+            appendToPrettyLog("  ⎿ approved: \(userText)\n")
+        case .deny:
+            // Pass the user's exact words to Claude via the deny message so
+            // the model sees the guidance ("run staging instead", "wait,
+            // check the tests first") and can act on it in the next turn
+            // rather than just seeing a bare "denied".
+            sendControlResponse(requestId: requestId, behavior: .deny, message: userText)
+            updatePendingPermission(requestId: requestId) { p in
+                p.status = .denied
+                p.reason = userText
+            }
+            appendToPrettyLog("  ⎿ denied: \(userText)\n")
+        }
+        pendingPermissions.removeValue(forKey: requestId)
+        // Claude will resume work on either verdict — allow triggers the tool
+        // call, deny surfaces the user's message as the tool result and the
+        // model composes a fresh reply.
+        isRunning = true
+    }
+
+    /// Write the JSON envelope Claude Code expects on stdin for a permission
+    /// verdict. See the Claude Agent SDK docs for the control_response shape;
+    /// the CLI matches on `request_id` inside `response`.
+    private func sendControlResponse(requestId: String,
+                                     behavior: PermissionBehavior,
+                                     message: String? = nil) {
+        var innerResponse: [String: Any] = ["behavior": behavior.rawValue]
+        if let message, behavior == .deny {
+            innerResponse["message"] = message
+        }
+        sendJSONLine([
+            "type": "control_response",
+            "response": [
+                "subtype": "success",
+                "request_id": requestId,
+                "response": innerResponse
+            ]
+        ])
+    }
+
+    private enum PermissionBehavior: String { case allow, deny }
+
+    /// Find the pending permission by request_id, mutate it in place in the
+    /// timeline, and re-publish so the card re-renders with the new status.
+    private func updatePendingPermission(requestId: String,
+                                         _ mutate: (inout PendingPermission) -> Void) {
+        for i in timeline.indices.reversed() {
+            if case var .pendingPermission(p) = timeline[i].kind, p.requestId == requestId {
+                mutate(&p)
+                timeline[i].kind = .pendingPermission(p)
+                return
+            }
+        }
+    }
+
+    private enum PermissionIntent { case allow, deny }
+
+    /// Local heuristic for "did the user say yes?" — deliberately conservative
+    /// so ambiguous replies get routed through deny (with the user's words as
+    /// the message), letting Claude interpret the guidance itself. Only a
+    /// short pure affirmation counts as allow. False negatives are cheap
+    /// (Claude just re-plans); false positives would run destructive commands
+    /// the user didn't sanction.
+    private static func classifyPermissionIntent(_ text: String) -> PermissionIntent {
+        let cleaned = text
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "[^a-z0-9 ]", with: "", options: .regularExpression)
+        let words = cleaned.split(separator: " ").map(String.init)
+        // Anything over five words almost certainly carries context ("yes but
+        // also run the tests first") that we shouldn't collapse to allow.
+        guard (1...5).contains(words.count) else { return .deny }
+        let yes: Set<String> = [
+            "y", "yes", "yeah", "yep", "yup", "sure", "ok", "okay",
+            "please", "go", "ahead", "do", "run", "proceed", "confirm",
+            "fine", "cool", "correct", "right", "affirmative"
+        ]
+        let no: Set<String> = [
+            "n", "no", "nope", "nah", "stop", "wait", "hold", "cancel",
+            "skip", "abort", "dont", "never", "reject", "negative"
+        ]
+        if words.contains(where: no.contains) { return .deny }
+        if words.contains(where: yes.contains) { return .allow }
+        return .deny
+    }
+
+    /// Compose a natural sentence for the permission ask. Bash gets the
+    /// command inline; other tools get a shorter framing since their input
+    /// isn't as immediately readable.
+    private static func composePermissionPrompt(toolName: String, summary: String) -> String {
+        let lower = toolName.lowercased()
+        switch lower {
+        case "bash":
+            return "May I run `\(summary)`?"
+        case "webfetch", "webrequest", "webread":
+            return "May I fetch \(summary)?"
+        default:
+            return "May I use the \(toolName) tool with \(summary)?"
+        }
+    }
+
+    /// One-line human-readable summary of a tool_use input, safe for a card
+    /// header and for TTS. Falls back to a compact JSON string for tools we
+    /// don't special-case.
+    private static func summarize(toolName: String, input: [String: Any]) -> String {
+        switch toolName.lowercased() {
+        case "bash":
+            if let cmd = input["command"] as? String {
+                return cmd.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        case "webfetch", "webrequest", "webread":
+            if let url = input["url"] as? String { return url }
+        default:
+            break
+        }
+        return prettyPrintJSON(input)
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "  +", with: " ", options: .regularExpression)
+    }
+
+    private static func prettyPrintJSON(_ obj: Any) -> String {
+        if let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
+           let str = String(data: data, encoding: .utf8) {
+            return str
+        }
+        return String(describing: obj)
     }
 
     private func handleSystemEvent(_ obj: [String: Any]) {
