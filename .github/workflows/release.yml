@@ -115,17 +115,72 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent Claudette.app Claudette.app.zip
           ls -lh Claudette.app.zip
 
-      - name: SHA256 checksum
+      - name: Install create-dmg
+        # Homebrew is preinstalled on macos-15; create-dmg is a small wrapper
+        # around hdiutil that produces a proper macOS installer window with the
+        # app icon + /Applications drop-link, matching what people expect when
+        # they double-click a .dmg from a GitHub release.
+        run: brew install create-dmg
+
+      - name: Build .dmg installer
         run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.name }}"
+          # Strip the leading `v` from the filename — Claudette-0.2.0.dmg is
+          # the idiomatic macOS naming, not Claudette-v0.2.0.dmg.
+          VERSION="${TAG#v}"
+          DMG="Claudette-${VERSION}.dmg"
           cd build
-          shasum -a 256 Claudette.app.zip > Claudette.app.zip.sha256
+          # create-dmg exits non-zero when it can't sign the DMG, which is
+          # expected on an ad-hoc-signed build (see create-dmg#72). We swallow
+          # that non-zero here so signing-only failures don't blow up the job,
+          # then verify explicitly below — a bare `|| test -f` guard would
+          # also let through zero-byte or corrupted DMGs.
+          create-dmg \
+            --volname "Claudette ${VERSION}" \
+            --volicon "../icon/Claudette.icns" \
+            --window-pos 200 120 \
+            --window-size 660 400 \
+            --icon-size 128 \
+            --icon "Claudette.app" 180 200 \
+            --hide-extension "Claudette.app" \
+            --app-drop-link 480 200 \
+            --no-internet-enable \
+            "${DMG}" \
+            "Claudette.app" \
+            || true
+          # Post-hoc integrity checks — any of these failing fails the step.
+          if [[ ! -f "${DMG}" ]]; then
+            echo "::error title=DMG missing::create-dmg did not produce ${DMG}"; exit 1
+          fi
+          DMG_SIZE_BYTES=$(stat -f %z "${DMG}")
+          # Claudette.app is several MB uncompressed; a valid installer will
+          # sit well above 1 MB. Anything smaller is a truncated / empty DMG.
+          if (( DMG_SIZE_BYTES < 1048576 )); then
+            echo "::error title=DMG too small::${DMG} is only ${DMG_SIZE_BYTES} bytes — expected > 1 MiB"; exit 1
+          fi
+          # `hdiutil verify` walks the DMG's checksum + master directory. A
+          # corrupted-but-non-empty DMG fails here, catching the failure mode
+          # the previous `|| test -f` guard would have let through.
+          hdiutil verify "${DMG}"
+          ls -lh Claudette-*.dmg
+
+      - name: SHA256 checksums
+        run: |
+          TAG="${{ steps.tag.outputs.name }}"
+          VERSION="${TAG#v}"
+          cd build
+          shasum -a 256 Claudette.app.zip       > Claudette.app.zip.sha256
+          shasum -a 256 "Claudette-${VERSION}.dmg" > "Claudette-${VERSION}.dmg.sha256"
           cat Claudette.app.zip.sha256
+          cat "Claudette-${VERSION}.dmg.sha256"
 
       - name: Create or update draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.tag.outputs.name }}"
+          VERSION="${TAG#v}"
 
           # Idempotent: on a first cut we create a draft release from scratch;
           # on a re-run (via the Actions "Re-run" button) we upload with
@@ -135,6 +190,12 @@ jobs:
           # A published (non-draft) release is treated as immutable — we refuse
           # to overwrite it so a retry can't silently mutate what users have
           # already downloaded.
+          ASSETS=(
+            "build/Claudette-${VERSION}.dmg"
+            "build/Claudette-${VERSION}.dmg.sha256"
+            "build/Claudette.app.zip"
+            "build/Claudette.app.zip.sha256"
+          )
           if gh release view "$TAG" >/dev/null 2>&1; then
             IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft)
             if [[ "$IS_DRAFT" != "true" ]]; then
@@ -142,10 +203,7 @@ jobs:
               exit 1
             fi
             echo "Release $TAG already exists as a draft — uploading new assets with --clobber."
-            gh release upload "$TAG" \
-              build/Claudette.app.zip \
-              build/Claudette.app.zip.sha256 \
-              --clobber
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
           else
             echo "Creating fresh draft release $TAG."
             # --draft so a human reviews the notes before making it public.
@@ -154,6 +212,5 @@ jobs:
               --draft \
               --title "$TAG" \
               --generate-notes \
-              build/Claudette.app.zip \
-              build/Claudette.app.zip.sha256
+              "${ASSETS[@]}"
           fi
