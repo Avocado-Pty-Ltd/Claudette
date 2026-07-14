@@ -1,13 +1,16 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 struct InputBar: View {
     @Binding var draft: String
+    @Binding var pendingImages: [UserImage]
     let isRunning: Bool
     let onSend: () -> Void
     let onStop: () -> Void
     @ObservedObject var speechInput: SpeechInput
     @State private var editorHeight: CGFloat = 24
+    @State private var isDropTargeted: Bool = false
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -23,17 +26,116 @@ struct InputBar: View {
                     .transition(.opacity)
             }
             Divider().overlay(Theme.Palette.border)
-            HStack(alignment: .bottom, spacing: 10) {
-                inputField
-                micButton
-                sendButton
+            VStack(spacing: 10) {
+                if !pendingImages.isEmpty {
+                    attachmentRow
+                }
+                HStack(alignment: .bottom, spacing: 10) {
+                    inputField
+                    micButton
+                    sendButton
+                }
             }
             .padding(.horizontal, Theme.Metric.contentPadding)
             .padding(.vertical, 18)
-            .background(Theme.Palette.bgPrimary)
+            .background(
+                Theme.Palette.bgPrimary
+                    .overlay(
+                        // Highlight ring while a drag is over the input area,
+                        // so the drop target is discoverable without a helper
+                        // caption cluttering the resting state.
+                        RoundedRectangle(cornerRadius: 0, style: .continuous)
+                            .stroke(Theme.Palette.accent, lineWidth: isDropTargeted ? 2 : 0)
+                            .allowsHitTesting(false)
+                    )
+            )
+            .onDrop(
+                of: [.image, .fileURL],
+                isTargeted: $isDropTargeted,
+                perform: handleDrop
+            )
         }
         .animation(.easeInOut(duration: 0.18), value: showSlashPopup)
         .animation(.easeInOut(duration: 0.18), value: speechInput.authError)
+        .animation(.easeInOut(duration: 0.14), value: isDropTargeted)
+        .animation(.easeInOut(duration: 0.18), value: pendingImages.count)
+    }
+
+    /// Horizontal strip of image attachment chips above the text field. Each
+    /// chip is a thumbnail with a hover-only close button so the user can
+    /// remove an image before sending.
+    private var attachmentRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(pendingImages) { img in
+                    ImageChip(image: img) {
+                        pendingImages.removeAll { $0.id == img.id }
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        var handledAny = false
+        for provider in providers {
+            // Prefer file URLs — they preserve the original filename and let
+            // us derive the media type from the extension.
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    guard let url else { return }
+                    guard let data = try? Data(contentsOf: url) else { return }
+                    guard let mediaType = Self.mediaType(for: url) else { return }
+                    let img = UserImage(data: data, mediaType: mediaType, filename: url.lastPathComponent)
+                    Task { @MainActor in pendingImages.append(img) }
+                }
+                handledAny = true
+                continue
+            }
+            // Fallback: raw image data (dragged out of a browser, screenshot
+            // hover thumbnail, etc). Ask for PNG since NSItemProvider will
+            // convert common formats on the way out.
+            if provider.hasItemConformingToTypeIdentifier(UTType.png.identifier) {
+                provider.loadDataRepresentation(forTypeIdentifier: UTType.png.identifier) { data, _ in
+                    guard let data else { return }
+                    let img = UserImage(data: data, mediaType: "image/png", filename: nil)
+                    Task { @MainActor in pendingImages.append(img) }
+                }
+                handledAny = true
+                continue
+            }
+            if provider.hasItemConformingToTypeIdentifier(UTType.jpeg.identifier) {
+                provider.loadDataRepresentation(forTypeIdentifier: UTType.jpeg.identifier) { data, _ in
+                    guard let data else { return }
+                    let img = UserImage(data: data, mediaType: "image/jpeg", filename: nil)
+                    Task { @MainActor in pendingImages.append(img) }
+                }
+                handledAny = true
+                continue
+            }
+        }
+        return handledAny
+    }
+
+    /// Map a file URL's extension to a MIME type that Anthropic's messages API
+    /// accepts. Returns nil for non-image extensions so unrelated drops (a .swift
+    /// file, a .txt) are silently ignored rather than sent as broken images.
+    /// Static so it can be called from the NSItemProvider completion (which
+    /// runs on a background queue) without hopping to the MainActor.
+    private static func mediaType(for url: URL) -> String? {
+        switch url.pathExtension.lowercased() {
+        case "png":               return "image/png"
+        case "jpg", "jpeg":       return "image/jpeg"
+        case "gif":               return "image/gif"
+        case "webp":              return "image/webp"
+        case "heic", "heif":
+            // API doesn't accept HEIC. Skip silently until we add a JPEG
+            // transcode step — supporting HEIC without transcoding would send
+            // bytes the model can't decode.
+            return nil
+        default:                  return nil
+        }
     }
 
     private var micButton: some View {
@@ -253,6 +355,32 @@ struct AutoResizingTextEditor: NSViewRepresentable {
             tv.needsDisplay = true
             onChange(tv)
         }
+    }
+}
+
+/// A single pending-attachment chip above the text field. Shows a thumbnail
+/// with a filename tooltip and a close button on hover.
+struct ImageChip: View {
+    let image: UserImage
+    let onRemove: () -> Void
+    @State private var hovering: Bool = false
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            AttachmentThumbnail(image: image, size: 56)
+                .help(image.filename ?? "Pasted image")
+            Button(action: onRemove) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.white, Color.black.opacity(0.75))
+                    .padding(3)
+            }
+            .buttonStyle(.plain)
+            .opacity(hovering ? 1 : 0)
+            .help("Remove")
+        }
+        .onHover { hovering = $0 }
+        .animation(.easeInOut(duration: 0.12), value: hovering)
     }
 }
 

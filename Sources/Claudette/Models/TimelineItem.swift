@@ -12,11 +12,31 @@ struct TimelineItem: Identifiable, Equatable {
     }
 
     enum Kind: Equatable {
-        case userText(String)
+        case userText(String, images: [UserImage] = [])
         case assistantText(text: String, isStreaming: Bool)
         case thinking(String)
         case action(ActionEvent)
         case system(String)
+    }
+}
+
+/// An image attached to a user message. Stored inline so it survives session
+/// state changes and can be rendered as a thumbnail in the timeline without
+/// re-reading from disk.
+struct UserImage: Equatable, Identifiable {
+    let id: UUID
+    let data: Data
+    /// MIME type like "image/png" — used verbatim in the Anthropic content block.
+    let mediaType: String
+    /// Original filename if the image came from disk; nil for direct drops
+    /// (e.g. an image dragged out of a browser without a filename).
+    let filename: String?
+
+    init(id: UUID = UUID(), data: Data, mediaType: String, filename: String? = nil) {
+        self.id = id
+        self.data = data
+        self.mediaType = mediaType
+        self.filename = filename
     }
 }
 

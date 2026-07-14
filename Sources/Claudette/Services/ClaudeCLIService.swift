@@ -92,9 +92,12 @@ final class ClaudeChatSession: ObservableObject {
 
     // MARK: - Public API
 
-    func send(_ prompt: String) {
+    func send(_ prompt: String, images: [UserImage] = []) {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        // Allow image-only messages (no text, but attachments present) so users
+        // can drop a screenshot with no accompanying prose and still have the
+        // model see it.
+        guard !trimmed.isEmpty || !images.isEmpty else { return }
 
         // Slash commands are handled natively by Claudette, not forwarded to the CLI.
         if trimmed.hasPrefix("/") {
@@ -102,7 +105,7 @@ final class ClaudeChatSession: ObservableObject {
             return
         }
 
-        timeline.append(TimelineItem(kind: .userText(prompt)))
+        timeline.append(TimelineItem(kind: .userText(prompt, images: images)))
         currentAssistantTextId = nil
         // Everything after the user's message belongs to this turn.
         turnStartIndex = timeline.count
@@ -127,7 +130,7 @@ final class ClaudeChatSession: ObservableObject {
         liveNarration = Self.openerPhrase()
 
         if process == nil {
-            startProcess(initialPrompt: prompt)
+            startProcess(initialPrompt: prompt, images: images)
         } else {
             // Second and subsequent turns on an existing process: startProcess isn't
             // called again, so isRunning was never flipped back on. Do it here so the
@@ -138,10 +141,34 @@ final class ClaudeChatSession: ObservableObject {
                 "type": "user",
                 "message": [
                     "role": "user",
-                    "content": [["type": "text", "text": prompt]]
+                    "content": Self.contentBlocks(text: prompt, images: images)
                 ]
             ])
         }
+    }
+
+    /// Build the Anthropic-style content array for a user message. Images
+    /// become base64 blocks so Claude Code forwards them straight to the model
+    /// — no Read-tool round-trip, no temp files on disk. Text goes first so
+    /// the model has the framing before the image, matching how the API docs
+    /// recommend ordering for image-plus-text prompts.
+    private static func contentBlocks(text: String, images: [UserImage]) -> [[String: Any]] {
+        var blocks: [[String: Any]] = []
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            blocks.append(["type": "text", "text": text])
+        }
+        for img in images {
+            blocks.append([
+                "type": "image",
+                "source": [
+                    "type": "base64",
+                    "media_type": img.mediaType,
+                    "data": img.data.base64EncodedString()
+                ]
+            ])
+        }
+        return blocks
     }
 
     // MARK: - Slash commands
@@ -339,7 +366,7 @@ final class ClaudeChatSession: ObservableObject {
 
     // MARK: - Process lifecycle
 
-    private func startProcess(initialPrompt: String) {
+    private func startProcess(initialPrompt: String, images: [UserImage] = []) {
         let claudePath = Self.locateClaudeBinary()
         guard let claudePath else {
             appendSystem("Could not find the `claude` CLI on your PATH. Install Claude Code and try again.")
@@ -416,7 +443,7 @@ final class ClaudeChatSession: ObservableObject {
                 "type": "user",
                 "message": [
                     "role": "user",
-                    "content": [["type": "text", "text": initialPrompt]]
+                    "content": Self.contentBlocks(text: initialPrompt, images: images)
                 ]
             ])
         } catch {

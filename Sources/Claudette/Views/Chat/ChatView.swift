@@ -9,6 +9,7 @@ struct ChatView: View {
     @StateObject private var speechInput = SpeechInput()
     @StateObject private var speechOutput: SpeechOutput
     @State private var draft: String = ""
+    @State private var pendingImages: [UserImage] = []
     @State private var showingResumeSheet = false
     @State private var conversationMode: Bool = false
 
@@ -41,6 +42,7 @@ struct ChatView: View {
                     Divider().overlay(Theme.Palette.border)
                     messageStream
                     InputBar(draft: $draft,
+                             pendingImages: $pendingImages,
                              isRunning: session.isRunning,
                              onSend: send,
                              onStop: session.stop,
@@ -404,8 +406,10 @@ struct ChatView: View {
 
     private func send() {
         let text = draft
+        let images = pendingImages
         draft = ""
-        session.send(text)
+        pendingImages = []
+        session.send(text, images: images)
     }
 }
 
