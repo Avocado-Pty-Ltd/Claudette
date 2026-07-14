@@ -1627,35 +1627,42 @@ private struct ProcessingRing: View {
     var body: some View {
         // Observatory spec:
         //   conic-gradient(from 0deg, transparent 0-62%, accent 92%, transparent 100%)
-        //   masked to a thin band via
-        //   radial-gradient(circle, transparent 66%, #000 67-69%, transparent 70%)
-        //   spinning CW at 2.8s per revolution.
+        //   masked to a thin band, spinning CW at 2.8s per revolution.
         // Only visible during thinking / interpreting.
-        TimelineView(.animation(minimumInterval: 1.0 / 45.0)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            let visible = (state == .thinking || state == .interpreting)
-            let ringD = orbRadius * 2.6   // canvas 440 vs orb 340 → 1.294; scaled up here for balance
-            let rotation = Angle.radians(t * (2 * .pi / 2.8))
+        //
+        // We draw it as a trimmed-and-stroked Circle rather than the
+        // gradient-masked square the previous implementation used. That
+        // approach was rendering blank in practice — SwiftUI masks composed of
+        // stroked shapes don't reliably clip AngularGradient the way the CSS
+        // spec did. A stroked trimmed Circle with an AngularGradient shading
+        // gives us the same comet-tail visual with pixel-accurate placement.
+        let visible = (state == .thinking || state == .interpreting)
+        let ringD = orbRadius * 1.94                // spec: 440 vs 340 orb ≈ 1.29× — but the orb here already sits at ~68% of the ring's diameter in the spec; scale to place the band right outside the sphere.
+        let bandWidth = max(2.5, orbRadius * 0.05)  // ~5% of orb radius — a thin filament
 
-            AngularGradient(
-                gradient: Gradient(stops: [
-                    .init(color: .clear,       location: 0.00),
-                    .init(color: .clear,       location: 0.62),
-                    .init(color: state.accent, location: 0.92),
-                    .init(color: .clear,       location: 1.00)
-                ]),
-                center: .center
-            )
-            .frame(width: ringD, height: ringD)
-            .mask(
-                Circle()
-                    .stroke(Color.black, lineWidth: ringD * 0.03)
-                    .frame(width: ringD * 0.68, height: ringD * 0.68)
-            )
-            .rotationEffect(rotation)
-            .position(center)
-            .opacity(visible ? 1 : 0)
-            .animation(.easeInOut(duration: 0.8), value: visible)
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let rotation = Angle.degrees((t * 360.0 / 2.8).truncatingRemainder(dividingBy: 360))
+            Circle()
+                .trim(from: 0.62, to: 1.0)
+                .stroke(
+                    AngularGradient(
+                        gradient: Gradient(stops: [
+                            .init(color: state.accent.opacity(0.0),  location: 0.62),
+                            .init(color: state.accent.opacity(0.35), location: 0.78),
+                            .init(color: state.accent,              location: 0.94),
+                            .init(color: state.accent.opacity(0.0), location: 1.00)
+                        ]),
+                        center: .center
+                    ),
+                    style: StrokeStyle(lineWidth: bandWidth, lineCap: .round)
+                )
+                .shadow(color: state.accent.opacity(0.55), radius: bandWidth * 1.4)
+                .frame(width: ringD, height: ringD)
+                .rotationEffect(rotation)
+                .position(center)
+                .opacity(visible ? 1 : 0)
+                .animation(.easeInOut(duration: 0.8), value: visible)
         }
     }
 }
@@ -1798,6 +1805,40 @@ private struct SubagentSphere: View {
     }
 }
 
+// MARK: - Liquid glass background
+
+/// Shared background for the Monitor / Plan panels. Approximates macOS 26's
+/// Liquid Glass on the pre-26 SDK: `.regularMaterial` behind, a light dark
+/// tint on top for readability, a top-lit hairline stroke for the "chamfered
+/// edge" feel, and a soft drop-shadow that grounds the panel over the busy
+/// starfield. Two overlays are used rather than one so the vertical highlight
+/// gradient doesn't wash out the bottom edge of the tint.
+private struct LiquidGlassPanel: View {
+    var cornerRadius: CGFloat = 14
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        shape
+            .fill(.regularMaterial)
+            .overlay(shape.fill(Color(hex: 0x08060E).opacity(0.28)))
+            .overlay(
+                shape.strokeBorder(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.28),
+                            Color.white.opacity(0.06),
+                            Color.white.opacity(0.02)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: 1
+                )
+            )
+            .shadow(color: Color.black.opacity(0.45), radius: 22, y: 10)
+    }
+}
+
 // MARK: - Todo panel
 
 /// A floating checklist showing Claude's live plan (from the TodoWrite tool). Docks
@@ -1837,18 +1878,7 @@ private struct TodoPanel: View {
         }
         .padding(EdgeInsets(top: 14, leading: 16, bottom: 14, trailing: 16))
         .frame(width: 240, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(hex: 0x08060E).opacity(0.6))
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(.ultraThinMaterial)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                )
-        )
+        .background(LiquidGlassPanel(cornerRadius: 14))
     }
 
     private func row(_ todo: TodoEntry) -> some View {
@@ -1932,21 +1962,7 @@ private struct MonitorPanel: View {
         }
         .padding(EdgeInsets(top: 14, leading: 16, bottom: 14, trailing: 16))
         .frame(width: 264, alignment: .leading)
-        .background(
-            // Design uses backdrop-filter:blur(12px). SwiftUI's .materials
-            // (.ultraThinMaterial) is the closest native equivalent — same
-            // frosted-glass effect over the scene behind it.
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(hex: 0x08060E).opacity(0.6))
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(.ultraThinMaterial)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                )
-        )
+        .background(LiquidGlassPanel(cornerRadius: 14))
     }
 
     private var statusLabel: String {
