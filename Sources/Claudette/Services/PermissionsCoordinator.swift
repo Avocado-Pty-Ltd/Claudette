@@ -48,8 +48,14 @@ final class PermissionsCoordinator: ObservableObject {
     /// Re-query the system for the current TCC state without prompting. Called
     /// on init and whenever we suspect the user may have flipped a setting.
     func refresh() {
-        microphone = Self.mapMicStatus(AVCaptureDevice.authorizationStatus(for: .audio))
-        speech = Self.mapSpeechStatus(SFSpeechRecognizer.authorizationStatus())
+        let rawMic = AVCaptureDevice.authorizationStatus(for: .audio)
+        let rawSpeech = SFSpeechRecognizer.authorizationStatus()
+        microphone = Self.mapMicStatus(rawMic)
+        speech = Self.mapSpeechStatus(rawSpeech)
+        NSLog("Claudette perms: bundleId=%@ rawMic=%d rawSpeech=%d → mic=%@ speech=%@",
+              Bundle.main.bundleIdentifier ?? "?",
+              rawMic.rawValue, rawSpeech.rawValue,
+              String(describing: microphone), String(describing: speech))
     }
 
     /// Ask for microphone if the state is `.undetermined`. Returns the final state.
@@ -74,6 +80,18 @@ final class PermissionsCoordinator: ObservableObject {
         _ = await Self.requestSpeechAuthorization()
         speech = Self.mapSpeechStatus(SFSpeechRecognizer.authorizationStatus())
         return speech
+    }
+
+    /// Force both requests unconditionally and re-query afterwards. Used from
+    /// the auth-error banner tap: if the user has already granted permission
+    /// in System Settings but the process's cached TCC binding is stale
+    /// (common for ad-hoc-signed apps where the code-signature changes on
+    /// every rebuild), calling `requestAuthorization` reconciles it — the
+    /// OS returns `.authorized` immediately without a prompt.
+    func forceReconcile() async {
+        _ = await Self.requestSpeechAuthorization()
+        _ = await Self.requestMic()
+        refresh()
     }
 
     /// Runs both requests sequentially. Called by the onboarding sheet's

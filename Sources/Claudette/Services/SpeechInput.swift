@@ -38,19 +38,27 @@ final class SpeechInput: ObservableObject {
         authError = nil
         partialTranscript = ""
 
-        // Read the current TCC state WITHOUT calling `requestAuthorization`.
-        // Prompting is exclusively owned by PermissionsOnboardingView so that
-        // the user never sees an OS dialog mid-conversation. If either grant
-        // is missing here, we fail cleanly and point at Settings — the user
-        // already declined or skipped onboarding.
+        // Reconcile TCC state via requestAuthorization on both frameworks
+        // rather than a bare authorizationStatus() read. For ad-hoc-signed
+        // builds the code signature changes on every rebuild — the OS holds
+        // the true grant against the current signature, but the process's
+        // cached mapping can lag behind. requestAuthorization flushes that
+        // cache: a no-op returning immediately when state is already decided,
+        // or a prompt when it's genuinely notDetermined. Idempotent either
+        // way. Onboarding still owns the FIRST-time prompt path; this is the
+        // reconciler for every subsequent press.
+        _ = await Self.reconcileSpeech()
         let speechAuth = SFSpeechRecognizer.authorizationStatus()
         guard speechAuth == .authorized else {
             authError = "Speech recognition not authorized. Enable it in System Settings → Privacy & Security → Speech Recognition."
+            NSLog("Claudette SpeechInput.start: speechAuth=%d — bailing", speechAuth.rawValue)
             return
         }
+        _ = await Self.reconcileMic()
         let micAuth = AVCaptureDevice.authorizationStatus(for: .audio)
         guard micAuth == .authorized else {
             authError = "Microphone access denied. Enable it in System Settings → Privacy & Security → Microphone."
+            NSLog("Claudette SpeechInput.start: micAuth=%d — bailing", micAuth.rawValue)
             return
         }
         guard let recognizer, recognizer.isAvailable else {
@@ -167,8 +175,24 @@ final class SpeechInput: ObservableObject {
         }
     }
 
-    // The permission-request helpers that used to live here have moved to
-    // PermissionsCoordinator, which owns all prompting up-front. SpeechInput
-    // only READS the current TCC status via authorizationStatus, so it never
-    // fires a system prompt from the middle of a hands-free flow.
+    // The permission-request helpers below flush a stale TCC cache. They are
+    // nonisolated because both frameworks deliver their completion on a
+    // background queue; a MainActor-isolated continuation resume would trap
+    // under Swift 6's executor check.
+
+    nonisolated private static func reconcileSpeech() async -> SFSpeechRecognizerAuthorizationStatus {
+        await withCheckedContinuation { cont in
+            SFSpeechRecognizer.requestAuthorization { status in
+                cont.resume(returning: status)
+            }
+        }
+    }
+
+    nonisolated private static func reconcileMic() async -> Bool {
+        await withCheckedContinuation { cont in
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                cont.resume(returning: granted)
+            }
+        }
+    }
 }
