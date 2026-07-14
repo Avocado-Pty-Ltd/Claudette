@@ -1,20 +1,32 @@
 name: Release
 
-# Triggered by pushing a v* tag (e.g. v0.1.0). Runs on a fresh macOS runner,
-# builds Claudette.app, zips it, and attaches the zip + a SHA256 checksum to
-# a DRAFT GitHub Release. Edit the notes and publish when ready.
+# Two ways to cut a release:
+#
+#   1. Push a v* tag from your terminal:
+#        git tag v0.2.0 -m "Claudette 0.2.0" && git push origin v0.2.0
+#      The `push` trigger below builds that exact tag.
+#
+#   2. Actions → Release → "Run workflow" → pick patch / minor / major.
+#      The workflow reads the latest existing vMAJOR.MINOR.PATCH tag,
+#      bumps the requested component, creates the new tag at the current
+#      main HEAD, then builds it. No terminal round-trip needed.
 
 on:
   push:
     tags:
       - 'v*'
 
-  # Manual trigger — pick a tag from the UI to re-run against.
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Tag to build (e.g. v0.1.0). Must already exist.'
+      bump:
+        description: 'Version bump — creates the next tag at current HEAD.'
         required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
 
 jobs:
   build:
@@ -24,16 +36,61 @@ jobs:
     # newer SDK is the right match anyway.
     runs-on: macos-15
     permissions:
-      contents: write   # needed to create the Release
+      contents: write   # needed to create the tag + Release
     steps:
       - name: Resolve tag
         id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [[ -n "${{ github.event.inputs.tag }}" ]]; then
-            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            # Tag-push trigger — the ref that triggered us IS the tag.
+            TAG="${GITHUB_REF#refs/tags/}"
+            echo "Building pushed tag: $TAG"
           else
-            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+            # Manual dispatch — compute the next semver tag from the requested
+            # bump, then create it at the current commit.
+            BUMP="${{ github.event.inputs.bump }}"
+            # `sort -V` gives semver-ish ordering; strict vX.Y.Z tags only, so
+            # pre-releases (v0.1.0-rc1) don't get confused with real releases.
+            LATEST=$(gh api "repos/${GITHUB_REPOSITORY}/tags" --paginate --jq '.[].name' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V \
+              | tail -1 \
+              || true)
+            if [[ -z "$LATEST" ]]; then
+              # Bootstrap — no vX.Y.Z tags yet.
+              TAG="v0.1.0"
+              echo "No existing tags found. Bootstrapping at $TAG."
+            else
+              VERSION="${LATEST#v}"
+              IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+              case "$BUMP" in
+                major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+                minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+                patch) PATCH=$((PATCH + 1)) ;;
+                *) echo "::error::Unknown bump: $BUMP"; exit 1 ;;
+              esac
+              TAG="v${MAJOR}.${MINOR}.${PATCH}"
+              echo "Bumping ${LATEST} → ${TAG}  (${BUMP})"
+            fi
+            # Refuse to overwrite an existing tag — the API returns 422 in
+            # that case anyway, but a clearer error message helps.
+            if gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" >/dev/null 2>&1; then
+              echo "::error title=Tag collision::Tag ${TAG} already exists. Push a new commit and try again, or pick a different bump."
+              exit 1
+            fi
+            # Create the tag on origin at the commit this workflow was
+            # dispatched from (`github.sha`, not "current main HEAD" — that
+            # keeps the commit-tagged deterministic even if main advances
+            # between when the button was clicked and when this step runs).
+            gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f "ref=refs/tags/${TAG}" \
+              -f "sha=${GITHUB_SHA}" >/dev/null
+            echo "Created tag ${TAG} → ${GITHUB_SHA}"
           fi
+          echo "name=${TAG}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         with:
@@ -126,9 +183,9 @@ jobs:
           VERSION="${TAG#v}"
 
           # Idempotent: on a first cut we create a draft release from scratch;
-          # on a re-run (or manual workflow_dispatch against an existing tag)
-          # we upload with --clobber so the retried build's artifacts replace
-          # the previous ones without failing on "release already exists".
+          # on a re-run (via the Actions "Re-run" button) we upload with
+          # --clobber so the retried build's artifacts replace the previous
+          # ones without failing on "release already exists".
           #
           # A published (non-draft) release is treated as immutable — we refuse
           # to overwrite it so a retry can't silently mutate what users have
