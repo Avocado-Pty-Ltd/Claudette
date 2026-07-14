@@ -22,6 +22,12 @@ struct OrbConversationView: View {
     @State private var savedSilenceInterval: TimeInterval = 0.9
     @State private var crawlBeats: [CrawlBeat] = []
     @State private var isFullscreen: Bool = false
+    /// Subject-theme labels that orbit the sphere. Persisted between turns so the
+    /// scene keeps its "always-alive" feel when idle — the design spec always shows
+    /// three-ish satellites hovering around the orb, never an empty ring. Populated
+    /// from each turn's interpretation tags / snippets; falls back to a fixed
+    /// decorative set on first entry before any turn has completed.
+    @State private var persistedThemes: [SatelliteLabel] = []
     @FocusState private var orbFocused: Bool
 
     var body: some View {
@@ -248,8 +254,17 @@ struct OrbConversationView: View {
             addCrawlBeat(text: chunk, kind: .streaming)
         }
         .onReceive(session.$interpretation) { interp in
-            guard let interp, !interp.narration.isEmpty else { return }
-            addCrawlBeat(text: interp.narration, kind: .narration)
+            guard let interp else { return }
+            if !interp.narration.isEmpty {
+                addCrawlBeat(text: interp.narration, kind: .narration)
+            }
+            // Capture this turn's theme labels so they keep orbiting after the
+            // turn finishes. Design spec has satellites present in every state,
+            // not just during a live turn.
+            var next: [SatelliteLabel] = []
+            for tag in interp.tags     { next.append(SatelliteLabel(text: tag,     kind: .tag)) }
+            for snippet in interp.snippets { next.append(SatelliteLabel(text: snippet, kind: .snippet)) }
+            if !next.isEmpty { persistedThemes = Array(next.prefix(6)) }
         }
     }
 
@@ -444,19 +459,22 @@ struct OrbConversationView: View {
 
     // MARK: - Satellites
 
+    /// Default subject themes when no turn has completed yet. Placeholder-ish so
+    /// the sphere reads as an active agent from the moment the user enters orb
+    /// mode, without waiting for a first interpretation to populate the ring.
+    private static let idleThemes: [SatelliteLabel] = [
+        SatelliteLabel(text: "voice", kind: .tag),
+        SatelliteLabel(text: "ideas", kind: .tag),
+        SatelliteLabel(text: "code",  kind: .tag)
+    ]
+
     private var satellites: [SatelliteLabel] {
         var out: [SatelliteLabel] = []
         if let live = session.activeAction, session.isRunning {
             out.append(SatelliteLabel(text: live.humanTitle.lowercased(), kind: .live))
         }
-        if let interp = session.interpretation {
-            for tag in interp.tags {
-                out.append(SatelliteLabel(text: tag, kind: .tag))
-            }
-            for snippet in interp.snippets {
-                out.append(SatelliteLabel(text: snippet, kind: .snippet))
-            }
-        }
+        let themes = persistedThemes.isEmpty ? Self.idleThemes : persistedThemes
+        out.append(contentsOf: themes)
         return Array(out.prefix(9))
     }
 
@@ -1808,25 +1826,27 @@ private struct SubagentSphere: View {
 // MARK: - Liquid glass background
 
 /// Shared background for the Monitor / Plan panels. Approximates macOS 26's
-/// Liquid Glass on the pre-26 SDK: `.regularMaterial` behind, a light dark
-/// tint on top for readability, a top-lit hairline stroke for the "chamfered
-/// edge" feel, and a soft drop-shadow that grounds the panel over the busy
-/// starfield. Two overlays are used rather than one so the vertical highlight
-/// gradient doesn't wash out the bottom edge of the tint.
+/// Liquid Glass on the pre-26 SDK. Uses `.background(.thinMaterial, in:)`
+/// rather than `.fill(.regularMaterial)` — the modifier form reliably renders
+/// a translucent blur of what's behind, whereas `.fill(material)` on a shape
+/// sometimes composites as a solid color. `.thinMaterial` was chosen over
+/// `.regularMaterial` because the panel sits over a busy starfield and the
+/// user should see stars ghosting through it — a heavier material read as
+/// opaque black. No dark tint layer: the material's own dark-mode vibrancy
+/// gives us the readability we need without hiding the backdrop.
 private struct LiquidGlassPanel: View {
     var cornerRadius: CGFloat = 14
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        shape
-            .fill(.regularMaterial)
-            .overlay(shape.fill(Color(hex: 0x08060E).opacity(0.28)))
+        Color.clear
+            .background(.thinMaterial, in: shape)
             .overlay(
                 shape.strokeBorder(
                     LinearGradient(
                         colors: [
-                            Color.white.opacity(0.28),
-                            Color.white.opacity(0.06),
+                            Color.white.opacity(0.32),
+                            Color.white.opacity(0.08),
                             Color.white.opacity(0.02)
                         ],
                         startPoint: .top,
@@ -1835,7 +1855,8 @@ private struct LiquidGlassPanel: View {
                     lineWidth: 1
                 )
             )
-            .shadow(color: Color.black.opacity(0.45), radius: 22, y: 10)
+            .clipShape(shape)
+            .shadow(color: Color.black.opacity(0.55), radius: 24, y: 12)
     }
 }
 
