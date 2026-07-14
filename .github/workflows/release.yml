@@ -62,19 +62,23 @@ jobs:
         # Homebrew is preinstalled on macos-15; create-dmg is a small wrapper
         # around hdiutil that produces a proper macOS installer window with the
         # app icon + /Applications drop-link, matching what people expect when
-        # they double-click a .dmg from a Github release.
+        # they double-click a .dmg from a GitHub release.
         run: brew install create-dmg
 
       - name: Build .dmg installer
         run: |
+          set -euo pipefail
           TAG="${{ steps.tag.outputs.name }}"
           # Strip the leading `v` from the filename — Claudette-0.2.0.dmg is
           # the idiomatic macOS naming, not Claudette-v0.2.0.dmg.
           VERSION="${TAG#v}"
+          DMG="Claudette-${VERSION}.dmg"
           cd build
-          # create-dmg exits non-zero if the resulting DMG can't be signed
-          # (spurious on ad-hoc); the `|| test -f` guard falls through only
-          # if the DMG was actually produced. See create-dmg#72.
+          # create-dmg exits non-zero when it can't sign the DMG, which is
+          # expected on an ad-hoc-signed build (see create-dmg#72). We swallow
+          # that non-zero here so signing-only failures don't blow up the job,
+          # then verify explicitly below — a bare `|| test -f` guard would
+          # also let through zero-byte or corrupted DMGs.
           create-dmg \
             --volname "Claudette ${VERSION}" \
             --volicon "../icon/Claudette.icns" \
@@ -85,9 +89,23 @@ jobs:
             --hide-extension "Claudette.app" \
             --app-drop-link 480 200 \
             --no-internet-enable \
-            "Claudette-${VERSION}.dmg" \
+            "${DMG}" \
             "Claudette.app" \
-            || test -f "Claudette-${VERSION}.dmg"
+            || true
+          # Post-hoc integrity checks — any of these failing fails the step.
+          if [[ ! -f "${DMG}" ]]; then
+            echo "::error title=DMG missing::create-dmg did not produce ${DMG}"; exit 1
+          fi
+          DMG_SIZE_BYTES=$(stat -f %z "${DMG}")
+          # Claudette.app is several MB uncompressed; a valid installer will
+          # sit well above 1 MB. Anything smaller is a truncated / empty DMG.
+          if (( DMG_SIZE_BYTES < 1048576 )); then
+            echo "::error title=DMG too small::${DMG} is only ${DMG_SIZE_BYTES} bytes — expected > 1 MiB"; exit 1
+          fi
+          # `hdiutil verify` walks the DMG's checksum + master directory. A
+          # corrupted-but-non-empty DMG fails here, catching the failure mode
+          # the previous `|| test -f` guard would have let through.
+          hdiutil verify "${DMG}"
           ls -lh Claudette-*.dmg
 
       - name: SHA256 checksums

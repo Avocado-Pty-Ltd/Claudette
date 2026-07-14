@@ -24,6 +24,8 @@ Grab the latest `.dmg` from [Releases](https://github.com/Avocado-Pty-Ltd/Claude
 
 Prefer a zip? `Claudette.app.zip` is attached to every release too — unzip and drop into `/Applications`.
 
+Runtime dependency: Claudette drives the [Claude Code](https://docs.claude.com/en/docs/claude-code) CLI under the hood — it launches the `claude` binary and reads its stream-JSON output. Install Claude Code and sign in (`claude auth`) before first launch, or Claudette will surface a "could not find `claude` on your PATH" error the first time you send a message.
+
 ### From source
 
 Requires macOS 15 (Sequoia) or newer, Xcode 16+ / Swift 6, and the [Claude Code](https://docs.claude.com/en/docs/claude-code) CLI installed and authenticated (`claude auth`).
