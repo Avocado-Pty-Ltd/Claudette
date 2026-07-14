@@ -166,11 +166,15 @@ radial(
 
 // ─── 3. Stars (three) ──────────────────────────────────────────────────────
 for star in spec.stars {
-    let cx = star.x * Double(scale)
-    let cy = star.y * Double(scale)
-    let r = star.r * Double(scale)
+    // Convert the design-unit coords (Double) into CGFloat explicitly so this
+    // block is portable to 32-bit builds where CGFloat is Float rather than
+    // Double. The apparent equivalence on 64-bit Darwin is a coincidence of
+    // the SDK, not a language guarantee.
+    let cx = CGFloat(star.x) * scale
+    let cy = CGFloat(star.y) * scale
+    let r  = CGFloat(star.r) * scale
     let rect = CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2)
-    ctx.setFillColor(star.color.withAlphaComponent(star.opacity).cgColor)
+    ctx.setFillColor(star.color.withAlphaComponent(CGFloat(star.opacity)).cgColor)
     ctx.fillEllipse(in: rect)
 }
 
@@ -298,6 +302,12 @@ ctx.restoreGState()
 // ─── 8. Top sheen ──────────────────────────────────────────────────────────
 // Very subtle white gradient across the top of the tile, gone by 38% down.
 // Fakes a glass-sphere reflection so the icon reads as raised at small sizes.
+//
+// The context was flipped near the top of the render (translateBy y=size,
+// scaleBy y=-1) so we can transcribe design coords with a top-left origin.
+// In flipped user space, y=0 is the top edge of the tile and y=size is the
+// bottom — so the sheen must run from (0, 0) down to (0, size) to sit
+// across the top of the icon, matching what the comment above describes.
 let sheenSpace = CGColorSpaceCreateDeviceRGB()
 let sheenColors = [
     NSColor.white.withAlphaComponent(spec.sheenAlpha).cgColor,
@@ -307,8 +317,8 @@ let sheenLocations: [CGFloat] = [0.0, CGFloat(spec.sheenFalloff)]
 if let sheen = CGGradient(colorsSpace: sheenSpace, colors: sheenColors, locations: sheenLocations) {
     ctx.drawLinearGradient(
         sheen,
-        start: CGPoint(x: 0, y: size),
-        end: CGPoint(x: 0, y: 0),
+        start: CGPoint(x: 0, y: 0),
+        end: CGPoint(x: 0, y: size),
         options: [.drawsAfterEndLocation]
     )
 }
