@@ -249,8 +249,14 @@ struct PendingPermissionView: View {
                     .foregroundStyle(Theme.Palette.textPrimary)
                     .lineSpacing(3)
                     .textSelection(.enabled)
-                if !permission.summary.isEmpty {
-                    Text(permission.summary)
+                // The prompt above already reads "May I run `foo`?", so it
+                // repeats the summary. What's useful in the mono block is the
+                // raw input payload — for a Write tool the JSON reveals
+                // `file_path` + `content`, for a WebFetch the request body,
+                // etc. Hide the block entirely when the payload is trivial
+                // (empty object, or Bash where the command IS the summary).
+                if let payload = inputPayloadForDisplay {
+                    Text(payload)
                         .font(.system(size: 12, weight: .regular, design: .monospaced))
                         .foregroundStyle(Theme.Palette.textSecondary)
                         .lineSpacing(2)
@@ -308,6 +314,17 @@ struct PendingPermissionView: View {
         case .allowed: return Color(hex: 0x4E8A7A)   // teal
         case .denied:  return Color(hex: 0x8A8580)   // graphite
         }
+    }
+
+    /// The raw input JSON to render in the mono block below the prompt, or
+    /// nil to hide the block entirely. Skipped when the prompt already carries
+    /// the full payload (Bash's command lives verbatim in "May I run `X`?")
+    /// or when the payload is empty — both cases would show noise.
+    private var inputPayloadForDisplay: String? {
+        let json = permission.inputJSON.trimmingCharacters(in: .whitespacesAndNewlines)
+        if json.isEmpty || json == "{}" { return nil }
+        if permission.toolName.lowercased() == "bash" { return nil }
+        return json
     }
 
     private var iconWell: some View {

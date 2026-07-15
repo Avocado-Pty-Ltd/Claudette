@@ -84,12 +84,18 @@ final class ClaudeChatSession: ObservableObject {
     /// Backstops the interpreter so a hung Haiku call doesn't leave the orb silent.
     private var interpretationTimeoutTask: Task<Void, Never>?
 
-    /// In-flight tool-use permission prompts, keyed by the CLI's request_id.
-    /// While non-empty, the next user message is intercepted by `send()` and
-    /// routed through `answerPermission` rather than sent to the CLI as a new
-    /// user turn — Claude is blocked waiting on our control_response, so a
-    /// fresh user message would deadlock the wire.
-    private var pendingPermissions: [String: PendingPermission.ID] = [:]
+    /// In-flight tool-use permission prompts, as an ordered FIFO queue of the
+    /// CLI's request_ids. While non-empty, the next user message is intercepted
+    /// by `send()` and routed through `answerPermission` rather than sent to
+    /// the CLI as a new user turn — Claude is blocked waiting on our
+    /// control_response, so a fresh user message would deadlock the wire.
+    ///
+    /// Order matters. A dictionary was used previously but Swift dictionary
+    /// iteration order is unspecified, so `.first` could route a user reply to
+    /// the wrong pending request if two ever queued up. An array preserves
+    /// arrival order — the user's reply is always applied to the oldest
+    /// pending prompt, matching the on-screen top-to-bottom order of cards.
+    private var pendingPermissions: [String] = []
 
     init(project: Project) {
         self.project = project
@@ -116,9 +122,10 @@ final class ClaudeChatSession: ObservableObject {
         // to that prompt — route it through the control_response wire instead of
         // opening a new user turn. Otherwise the CLI would deadlock (it's still
         // reading for a control_response on the same request_id) and the user's
-        // reply would sit in stdin ignored.
-        if let firstPending = pendingPermissions.first {
-            answerPermission(requestId: firstPending.key, userText: prompt)
+        // reply would sit in stdin ignored. Answer the OLDEST pending prompt
+        // (FIFO), matching the visible top-to-bottom order of the cards.
+        if let oldestPending = pendingPermissions.first {
+            answerPermission(requestId: oldestPending, userText: prompt, images: images)
             return
         }
 
@@ -618,7 +625,7 @@ final class ClaudeChatSession: ObservableObject {
             prompt: prompt
         )
         timeline.append(TimelineItem(kind: .pendingPermission(pending)))
-        pendingPermissions[requestId] = pending.id
+        pendingPermissions.append(requestId)
 
         // Surface the ask into the voice channel too so orb mode isn't silent
         // while the user stares at a paused sphere.
@@ -634,32 +641,46 @@ final class ClaudeChatSession: ObservableObject {
     /// The user has typed / spoken a response while a permission was pending.
     /// Classify their intent, update the pending card, and forward the
     /// verdict as a control_response so Claude can resume.
-    private func answerPermission(requestId: String, userText: String) {
+    ///
+    /// Images are preserved in the timeline entry so an attached screenshot
+    /// (e.g. "here's why I'm skipping this") isn't silently dropped. They
+    /// don't ride on the control_response wire — the CLI's response schema
+    /// has no image slot — but they DO stay visible in the conversation.
+    /// If the user sends images with no text, we treat it as a deny with a
+    /// generic message: image-only replies to a yes/no prompt are almost
+    /// never an affirmation of a destructive command.
+    private func answerPermission(requestId: String, userText: String, images: [UserImage] = []) {
         // Show the user's answer in the timeline like a normal message, so the
         // pending card + response read as a natural conversation exchange.
-        timeline.append(TimelineItem(kind: .userText(userText)))
+        timeline.append(TimelineItem(kind: .userText(userText, images: images)))
 
-        let intent = Self.classifyPermissionIntent(userText)
+        let trimmed = userText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let intent: PermissionIntent = trimmed.isEmpty
+            ? .deny   // image-only reply — not an affirmation
+            : Self.classifyPermissionIntent(trimmed)
         switch intent {
         case .allow:
             sendControlResponse(requestId: requestId, behavior: .allow)
             updatePendingPermission(requestId: requestId) { p in
                 p.status = .allowed
             }
-            appendToPrettyLog("  ⎿ approved: \(userText)\n")
+            appendToPrettyLog("  ⎿ approved: \(trimmed)\n")
         case .deny:
             // Pass the user's exact words to Claude via the deny message so
             // the model sees the guidance ("run staging instead", "wait,
             // check the tests first") and can act on it in the next turn
-            // rather than just seeing a bare "denied".
-            sendControlResponse(requestId: requestId, behavior: .deny, message: userText)
+            // rather than just seeing a bare "denied". Image-only replies
+            // get a stock message; images themselves stay visible in the
+            // timeline but don't go on the wire.
+            let denyMessage = trimmed.isEmpty ? "User attached image(s) instead of approving." : trimmed
+            sendControlResponse(requestId: requestId, behavior: .deny, message: denyMessage)
             updatePendingPermission(requestId: requestId) { p in
                 p.status = .denied
-                p.reason = userText
+                p.reason = trimmed.isEmpty ? nil : trimmed
             }
-            appendToPrettyLog("  ⎿ denied: \(userText)\n")
+            appendToPrettyLog("  ⎿ denied: \(denyMessage)\n")
         }
-        pendingPermissions.removeValue(forKey: requestId)
+        pendingPermissions.removeAll { $0 == requestId }
         // Claude will resume work on either verdict — allow triggers the tool
         // call, deny surfaces the user's message as the tool result and the
         // model composes a fresh reply.
@@ -705,32 +726,47 @@ final class ClaudeChatSession: ObservableObject {
 
     /// Local heuristic for "did the user say yes?" — deliberately conservative
     /// so ambiguous replies get routed through deny (with the user's words as
-    /// the message), letting Claude interpret the guidance itself. Only a
-    /// short pure affirmation counts as allow. False negatives are cheap
-    /// (Claude just re-plans); false positives would run destructive commands
-    /// the user didn't sanction.
+    /// the message), letting Claude interpret the guidance itself. False
+    /// negatives are cheap (Claude just re-plans); false positives would run
+    /// destructive commands the user didn't sanction.
+    ///
+    /// The classifier matches the ENTIRE normalised reply against a small
+    /// whitelist of pure affirmations. An earlier version scanned individual
+    /// tokens against a `yes` set, which meant "run staging instead" (contains
+    /// `run`) or "ok but wait" (contains `ok`) would incorrectly allow a
+    /// destructive tool call — the exact failure mode this classifier is
+    /// supposed to prevent. Whole-phrase matching is more restrictive but
+    /// unambiguous: if in doubt, deny and let the user's words guide Claude.
     private static func classifyPermissionIntent(_ text: String) -> PermissionIntent {
+        // Normalise: lowercase, strip punctuation, collapse whitespace, trim.
         let cleaned = text
             .lowercased()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "[^a-z0-9 ]", with: "", options: .regularExpression)
-        let words = cleaned.split(separator: " ").map(String.init)
-        // Anything over five words almost certainly carries context ("yes but
-        // also run the tests first") that we shouldn't collapse to allow.
-        guard (1...5).contains(words.count) else { return .deny }
-        let yes: Set<String> = [
-            "y", "yes", "yeah", "yep", "yup", "sure", "ok", "okay",
-            "please", "go", "ahead", "do", "run", "proceed", "confirm",
-            "fine", "cool", "correct", "right", "affirmative"
-        ]
-        let no: Set<String> = [
-            "n", "no", "nope", "nah", "stop", "wait", "hold", "cancel",
-            "skip", "abort", "dont", "never", "reject", "negative"
-        ]
-        if words.contains(where: no.contains) { return .deny }
-        if words.contains(where: yes.contains) { return .allow }
-        return .deny
+            .replacingOccurrences(of: " +", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        guard !cleaned.isEmpty else { return .deny }
+        return allowPhrases.contains(cleaned) ? .allow : .deny
     }
+
+    /// Complete phrases that count as an unambiguous "yes, run it". Extend
+    /// with care — anything added here must be a self-contained affirmation
+    /// with no possible qualifying tail. Colloquial variants are welcome
+    /// ("yeah go for it"); anything that could be a fragment of a longer
+    /// instruction ("run", "do") is not.
+    private static let allowPhrases: Set<String> = [
+        "y", "yes", "yep", "yup", "yeah", "yea",
+        "ok", "okay", "k",
+        "sure", "sure thing",
+        "go", "go ahead", "go for it",
+        "do it", "run it", "please do", "please",
+        "confirm", "confirmed", "approved", "approve",
+        "affirmative", "correct", "right",
+        "yes please", "ok please",
+        "yes go ahead", "yeah go ahead", "sure go ahead",
+        "yes do it", "yeah do it", "sure do it",
+        "yes run it", "yeah run it",
+        "fine", "sounds good", "sounds good to me"
+    ]
 
     /// Compose a natural sentence for the permission ask. Bash gets the
     /// command inline; other tools get a shorter framing since their input
