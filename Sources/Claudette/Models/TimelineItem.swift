@@ -17,6 +17,54 @@ struct TimelineItem: Identifiable, Equatable {
         case thinking(String)
         case action(ActionEvent)
         case system(String)
+        case pendingPermission(PendingPermission)
+    }
+}
+
+/// Claude Code has asked "can I use this tool?" via a `control_request` event.
+/// Instead of a modal, we render this inline in the timeline as a conversational
+/// question — the next user utterance becomes the answer. Voice-friendly: the
+/// prompt text is spoken via TTS in orb mode; the user replies by talking back.
+struct PendingPermission: Equatable, Identifiable {
+    let id: UUID
+    /// The CLI's `request_id` — echoed back on control_response so it knows
+    /// which pending prompt we're answering.
+    let requestId: String
+    /// Tool name from the request (e.g. "Bash", "WebFetch").
+    let toolName: String
+    /// One-line summary of the tool's input, safe to show in the card and
+    /// speak via TTS. For Bash this is the command; for other tools it's a
+    /// short JSON preview.
+    let summary: String
+    /// Full input JSON, pretty-printed. Shown in the card's expanded body.
+    let inputJSON: String
+    /// Natural-language question Claudette asked ("May I run …?"). Kept on
+    /// the model so the timeline still reads cleanly if the user scrolls
+    /// back to a resolved permission from an earlier turn.
+    let prompt: String
+    var status: Status
+    /// Free-text reason the user gave. Present on `.denied` (their guidance
+    /// verbatim, so Claude can respond to it); nil on `.allowed`.
+    var reason: String?
+
+    enum Status: String { case pending, allowed, denied }
+
+    init(id: UUID = UUID(),
+         requestId: String,
+         toolName: String,
+         summary: String,
+         inputJSON: String,
+         prompt: String,
+         status: Status = .pending,
+         reason: String? = nil) {
+        self.id = id
+        self.requestId = requestId
+        self.toolName = toolName
+        self.summary = summary
+        self.inputJSON = inputJSON
+        self.prompt = prompt
+        self.status = status
+        self.reason = reason
     }
 }
 

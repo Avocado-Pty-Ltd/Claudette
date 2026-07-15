@@ -17,6 +17,9 @@ struct TimelineItemView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .system(let text):
             SystemNoticeView(text: text)
+        case .pendingPermission(let permission):
+            PendingPermissionView(permission: permission)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
@@ -217,6 +220,149 @@ struct ThinkingView: View {
                     .padding(.leading, 4)
                     .transition(.opacity)
             }
+        }
+    }
+}
+
+/// Card shown when Claude Code fires a control_request and Claudette turns it
+/// into a conversational ask. Distinct from action cards — the icon, hue, and
+/// hint line all make it obvious the user is being asked, not just informed.
+/// The user answers with their next message; on resolution the card updates
+/// in place with the allow/deny status and (if denied) the guidance they gave.
+struct PendingPermissionView: View {
+    let permission: PendingPermission
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            iconWell
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text(permission.toolName.uppercased())
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .tracking(1.6)
+                        .foregroundStyle(hue.opacity(0.85))
+                    statusPill
+                    Spacer(minLength: 0)
+                }
+                Text(permission.prompt)
+                    .font(Theme.Font.bodySerif)
+                    .foregroundStyle(Theme.Palette.textPrimary)
+                    .lineSpacing(3)
+                    .textSelection(.enabled)
+                // The prompt above already reads "May I run `foo`?", so it
+                // repeats the summary. What's useful in the mono block is the
+                // raw input payload — for a Write tool the JSON reveals
+                // `file_path` + `content`, for a WebFetch the request body,
+                // etc. Hide the block entirely when the payload is trivial
+                // (empty object, or Bash where the command IS the summary).
+                if let payload = inputPayloadForDisplay {
+                    Text(payload)
+                        .font(.system(size: 12, weight: .regular, design: .monospaced))
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                        .lineSpacing(2)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.white.opacity(0.03))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .stroke(Theme.Palette.border, lineWidth: 0.5)
+                                )
+                        )
+                        .textSelection(.enabled)
+                }
+                Group {
+                    switch permission.status {
+                    case .pending:
+                        Text("Say “yes” to run it, or tell me what to do differently.")
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                    case .allowed:
+                        Text("Approved.")
+                            .foregroundStyle(Color(hex: 0x4E8A7A))
+                    case .denied:
+                        if let reason = permission.reason?.trimmingCharacters(in: .whitespacesAndNewlines), !reason.isEmpty {
+                            Text("Skipped — “\(reason)”")
+                                .foregroundStyle(Theme.Palette.textTertiary)
+                        } else {
+                            Text("Skipped.")
+                                .foregroundStyle(Theme.Palette.textTertiary)
+                        }
+                    }
+                }
+                .font(.system(size: 12, weight: .medium))
+            }
+        }
+        .padding(EdgeInsets(top: 12, leading: 14, bottom: 12, trailing: 14))
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(hue.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(hue.opacity(0.35), lineWidth: 0.8)
+                )
+        )
+    }
+
+    private var hue: Color {
+        // Amber-ish while pending, green when allowed, muted grey when denied
+        // — the status colour reaches the whole card, not just the pill,
+        // so a scan of the timeline immediately shows resolved vs open asks.
+        switch permission.status {
+        case .pending: return Color(hex: 0xC96442)   // Claudette accent orange
+        case .allowed: return Color(hex: 0x4E8A7A)   // teal
+        case .denied:  return Color(hex: 0x8A8580)   // graphite
+        }
+    }
+
+    /// The raw input JSON to render in the mono block below the prompt, or
+    /// nil to hide the block entirely. Skipped when the prompt already carries
+    /// the full payload (Bash's command lives verbatim in "May I run `X`?")
+    /// or when the payload is empty — both cases would show noise.
+    private var inputPayloadForDisplay: String? {
+        let json = permission.inputJSON.trimmingCharacters(in: .whitespacesAndNewlines)
+        if json.isEmpty || json == "{}" { return nil }
+        if permission.toolName.lowercased() == "bash" { return nil }
+        return json
+    }
+
+    private var iconWell: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(hue.opacity(0.15))
+                .frame(width: 32, height: 32)
+            Image(systemName: iconName)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(hue)
+        }
+    }
+
+    private var iconName: String {
+        switch permission.status {
+        case .pending: return "hand.raised.fill"
+        case .allowed: return "checkmark.circle.fill"
+        case .denied:  return "hand.thumbsdown.fill"
+        }
+    }
+
+    private var statusPill: some View {
+        Text(statusLabel)
+            .font(.system(size: 9, weight: .bold, design: .monospaced))
+            .tracking(1.2)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(
+                Capsule(style: .continuous).fill(hue.opacity(0.85))
+            )
+    }
+
+    private var statusLabel: String {
+        switch permission.status {
+        case .pending: return "ASKING"
+        case .allowed: return "ALLOWED"
+        case .denied:  return "SKIPPED"
         }
     }
 }
