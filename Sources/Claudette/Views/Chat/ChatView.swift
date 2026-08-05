@@ -215,7 +215,7 @@ struct ChatView: View {
         Button {
             if voiceConfig.isConfigured {
                 voiceConfig.ttsEnabled.toggle()
-                if !voiceConfig.ttsEnabled { speechOutput.stop() }
+                if !voiceConfig.ttsEnabled { speechOutput.mute() }
             } else {
                 NotificationCenter.default.post(name: .claudetteShowSettings, object: nil)
             }

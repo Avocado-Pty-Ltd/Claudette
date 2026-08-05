@@ -97,6 +97,13 @@ final class ClaudeChatSession: ObservableObject {
     /// pending prompt, matching the on-screen top-to-bottom order of cards.
     private var pendingPermissions: [String] = []
 
+    /// Original tool input dict for each pending permission, keyed by
+    /// request_id. On `allow` we must echo this back as `updatedInput` in
+    /// the control_response — Claude Code CLI < 2.1.207 rejects an allow
+    /// that omits it and denies the tool with a validation error instead
+    /// of executing it.
+    private var pendingPermissionInputs: [String: [String: Any]] = [:]
+
     init(project: Project) {
         self.project = project
         self.cwdDisplay = project.displayPath
@@ -112,8 +119,12 @@ final class ClaudeChatSession: ObservableObject {
         // model see it.
         guard !trimmed.isEmpty || !images.isEmpty else { return }
 
-        // Slash commands are handled natively by Claudette, not forwarded to the CLI.
-        if trimmed.hasPrefix("/") {
+        // Slash commands prefixed with `/` are either Claudette-native (e.g. /help,
+        // /mode, /resume) or Claude Code custom commands from ~/.claude/commands.
+        // Native ones short-circuit here; anything else (including user-defined
+        // commands like /goal) is forwarded to the CLI as a normal user message
+        // so Claude Code can resolve it against its command registry.
+        if trimmed.hasPrefix("/"), Self.isNativeSlashCommand(trimmed) {
             handleSlashCommand(trimmed)
             return
         }
@@ -196,6 +207,19 @@ final class ClaudeChatSession: ObservableObject {
     }
 
     // MARK: - Slash commands
+
+    /// Native Claudette-handled slash commands. Anything else that starts with
+    /// `/` is passed through to the Claude CLI so its own command registry
+    /// (built-ins + custom `.claude/commands/*.md` files like `/goal`) can
+    /// resolve it. Keep in sync with `handleSlashCommand`'s switch below.
+    private static let nativeSlashCommands: Set<String> = [
+        "/clear", "/new", "/help", "/resume", "/model", "/mode", "/reveal", "/session"
+    ]
+
+    private static func isNativeSlashCommand(_ line: String) -> Bool {
+        let head = line.split(separator: " ", maxSplits: 1).first.map(String.init) ?? line
+        return nativeSlashCommands.contains(head.lowercased())
+    }
 
     private func handleSlashCommand(_ line: String) {
         let parts = line.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).map(String.init)
@@ -384,6 +408,8 @@ final class ClaudeChatSession: ObservableObject {
         subagents.removeAll()
         todos.removeAll()
         latestMonitor = nil
+        pendingPermissions.removeAll()
+        pendingPermissionInputs.removeAll()
         interpretationTimeoutTask?.cancel()
         interpreter.cancel()
     }
@@ -407,7 +433,14 @@ final class ClaudeChatSession: ObservableObject {
             "--output-format", "stream-json",
             "--verbose",
             "--permission-mode", permissionMode.cliValue,
-            "--include-partial-messages"
+            "--include-partial-messages",
+            // Route tool-permission asks over the stream-json wire as
+            // `control_request` events instead of silently returning an
+            // is_error tool_result. Without this flag the CLI treats any
+            // tool that needs approval as auto-denied — the model then sees
+            // "Claude requested permissions to use X, but you haven't
+            // granted it yet" and hallucinates a modal that doesn't exist.
+            "--permission-prompt-tool", "stdio"
         ]
         // Prefer the live sessionId (set by the CLI's `system.init` on the previous run)
         // so multi-turn conversations continue the same Claude Code session. The persisted
@@ -626,6 +659,7 @@ final class ClaudeChatSession: ObservableObject {
         )
         timeline.append(TimelineItem(kind: .pendingPermission(pending)))
         pendingPermissions.append(requestId)
+        pendingPermissionInputs[requestId] = input
 
         // Surface the ask into the voice channel too so orb mode isn't silent
         // while the user stares at a paused sphere.
@@ -660,7 +694,13 @@ final class ClaudeChatSession: ObservableObject {
             : Self.classifyPermissionIntent(trimmed)
         switch intent {
         case .allow:
-            sendControlResponse(requestId: requestId, behavior: .allow)
+            // Echo the original tool input back as updatedInput. Required by
+            // Claude Code CLI < 2.1.207, harmless on newer versions. Falls
+            // back to an empty dict if we somehow lost the input (shouldn't
+            // happen, but the CLI would reject a missing field either way so
+            // an empty stub gives a clearer server-side error than a crash).
+            let originalInput = pendingPermissionInputs[requestId] ?? [:]
+            sendControlResponse(requestId: requestId, behavior: .allow, updatedInput: originalInput)
             updatePendingPermission(requestId: requestId) { p in
                 p.status = .allowed
             }
@@ -681,6 +721,7 @@ final class ClaudeChatSession: ObservableObject {
             appendToPrettyLog("  ⎿ denied: \(denyMessage)\n")
         }
         pendingPermissions.removeAll { $0 == requestId }
+        pendingPermissionInputs.removeValue(forKey: requestId)
         // Claude will resume work on either verdict — allow triggers the tool
         // call, deny surfaces the user's message as the tool result and the
         // model composes a fresh reply.
@@ -690,10 +731,18 @@ final class ClaudeChatSession: ObservableObject {
     /// Write the JSON envelope Claude Code expects on stdin for a permission
     /// verdict. See the Claude Agent SDK docs for the control_response shape;
     /// the CLI matches on `request_id` inside `response`.
+    ///
+    /// On `allow`, `updatedInput` is required by CLI < 2.1.207 — pass the
+    /// original tool input (unmodified). On `deny`, pass the user's message
+    /// so the model sees their guidance and can re-plan.
     private func sendControlResponse(requestId: String,
                                      behavior: PermissionBehavior,
+                                     updatedInput: [String: Any]? = nil,
                                      message: String? = nil) {
         var innerResponse: [String: Any] = ["behavior": behavior.rawValue]
+        if behavior == .allow {
+            innerResponse["updatedInput"] = updatedInput ?? [:]
+        }
         if let message, behavior == .deny {
             innerResponse["message"] = message
         }

@@ -1,4 +1,6 @@
 import SwiftUI
+import AVFoundation
+import AppKit
 
 /// One-time onboarding sheet shown on first launch. Explains what Claudette needs,
 /// what it doesn't, and requests mic + speech in a single flow so the user isn't
@@ -16,6 +18,9 @@ struct PermissionsOnboardingView: View {
         VStack(alignment: .leading, spacing: 24) {
             header
             requestList
+            if !Self.hasEnhancedAppleVoice {
+                enhancedVoicePrompt
+            }
             fineprint
             Spacer(minLength: 0)
             footer
@@ -59,6 +64,75 @@ struct PermissionsOnboardingView: View {
                 explanation: "On-device — nothing leaves your Mac. Turns what you say into text.",
                 status: permissions.speech
             )
+        }
+    }
+
+    /// Encourages the user to install one of Apple's Enhanced / Premium voices
+    /// so the free (no-key) TTS path doesn't sound robotic. Only shown when no
+    /// Enhanced/Premium en-* voice is already installed — otherwise it would
+    /// nag someone who already sorted this out.
+    private var enhancedVoicePrompt: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: "waveform.and.person.filled")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Theme.Palette.accent)
+                .frame(width: 32, height: 32)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Theme.Palette.accent.opacity(0.12))
+                )
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Upgrade Apple's built-in voice (optional)")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.Palette.textPrimary)
+                Text("The default macOS voice is robotic. Download an Enhanced or Premium voice (Ava, Zoe, Evan…) — the free TTS in Claudette will use it automatically.")
+                    .font(Theme.Font.micro)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Open Spoken Content settings") {
+                    Self.openSpokenContentSettings()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .padding(.top, 2)
+            }
+            Spacer(minLength: 8)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Theme.Palette.bgElevated)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Theme.Palette.border, lineWidth: 0.5)
+                )
+        )
+    }
+
+    /// True when the system has at least one Enhanced or Premium English voice
+    /// installed. `AVSpeechSynthesisVoice.quality` returns `.default` for the
+    /// built-in low-fidelity voices and `.enhanced` / `.premium` for the
+    /// downloaded ones, so this is a clean signal without needing an entitlement.
+    private static var hasEnhancedAppleVoice: Bool {
+        AVSpeechSynthesisVoice.speechVoices().contains { voice in
+            voice.language.hasPrefix("en") &&
+            (voice.quality == .enhanced || voice.quality == .premium)
+        }
+    }
+
+    /// Deep-link into System Settings → Accessibility → Spoken Content, where
+    /// the "System Voice" dropdown has the "Manage Voices…" entry that lets the
+    /// user download Enhanced / Premium voices. The URL differs between macOS
+    /// versions; we try the modern one first and fall back to the legacy pane.
+    private static func openSpokenContentSettings() {
+        let candidates = [
+            // macOS 13+ (System Settings)
+            "x-apple.systempreferences:com.apple.Accessibility-Settings.extension?SpokenContent",
+            // macOS 12 and earlier (System Preferences)
+            "x-apple.systempreferences:com.apple.preference.universalaccess?SpeakableItems"
+        ]
+        for raw in candidates {
+            if let url = URL(string: raw), NSWorkspace.shared.open(url) { return }
         }
     }
 

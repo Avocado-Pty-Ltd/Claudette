@@ -70,6 +70,11 @@ final class SpeechOutput: NSObject, ObservableObject {
     ///   2. ElevenLabs   — if credentials are configured.
     ///   3. Apple native — graceful fallback so we never silently drop a beat.
     private func pumpQueue() {
+        guard config.ttsEnabled else {
+            // TTS was toggled off while beats were still queued — drop them.
+            queue.removeAll()
+            return
+        }
         guard !isSpeaking else { return }
         guard !queue.isEmpty else { return }
         let next = queue.removeFirst()
@@ -86,6 +91,19 @@ final class SpeechOutput: NSObject, ObservableObject {
         queue.removeAll()
         interruptCurrent()
     }
+
+    /// Public entrypoint the UI calls when the user mutes mid-stream. In addition
+    /// to killing the current player + queue, we bump a generation counter so any
+    /// ElevenLabs Task that already left the `Task.isCancelled` check but hasn't
+    /// yet hopped onto MainActor.run to call `playElevenAudio` will notice its
+    /// generation is stale and bail out. Without this, a synthesise call in
+    /// flight when the user mutes still plays a few seconds later.
+    func mute() {
+        muteGeneration &+= 1
+        stop()
+    }
+
+    private var muteGeneration: Int = 0
 
     /// Cancels any in-flight playback but leaves the queue untouched — used when we
     /// need to switch backends mid-beat (e.g. ElevenLabs failed → native fallback)
@@ -110,6 +128,10 @@ final class SpeechOutput: NSObject, ObservableObject {
     // MARK: - Native fallback
 
     private func speakViaNative(_ text: String) {
+        // Bail if the user muted between the moment this beat was pulled off the
+        // queue and the moment we got here — e.g. via the ElevenLabs catch-block
+        // fallback which is scheduled asynchronously.
+        guard config.ttsEnabled else { return }
         // Interrupt any in-flight playback but keep the queue — fallback callers
         // still want the remaining beats to play once this one finishes.
         interruptCurrent()
@@ -140,9 +162,13 @@ final class SpeechOutput: NSObject, ObservableObject {
     // MARK: - ElevenLabs
 
     private func speakViaElevenLabs(_ text: String) {
+        guard config.ttsEnabled else { return }
         currentTask?.cancel()
         let cfg = config
         let clean = Self.chunkForSpeech(text)
+        // Snapshot the generation now — if the user mutes before playback starts,
+        // the counter bumps and we abandon this beat instead of playing it late.
+        let generation = muteGeneration
         // Optimistic: mark speaking immediately so the conversation loop knows to wait.
         isSpeaking = true
 
@@ -156,11 +182,25 @@ final class SpeechOutput: NSObject, ObservableObject {
                 )
                 if Task.isCancelled { return }
                 try await MainActor.run { [weak self] in
-                    try self?.playElevenAudio(audio)
+                    guard let self else { return }
+                    // Between the isCancelled check and this MainActor hop, the
+                    // user may have muted. Re-check ttsEnabled + generation so we
+                    // don't play a beat the user just silenced.
+                    guard self.config.ttsEnabled, self.muteGeneration == generation else {
+                        self.isSpeaking = false
+                        return
+                    }
+                    try self.playElevenAudio(audio)
                 }
             } catch {
                 await MainActor.run { [weak self] in
                     guard let self else { return }
+                    // Same guard as above — if the user muted, don't fall back to
+                    // native TTS just because ElevenLabs errored/cancelled.
+                    guard self.config.ttsEnabled, self.muteGeneration == generation else {
+                        self.isSpeaking = false
+                        return
+                    }
                     // ElevenLabs failed — fall back to native so the user still hears
                     // *something* and the conversation loop can proceed.
                     self.lastError = error.localizedDescription

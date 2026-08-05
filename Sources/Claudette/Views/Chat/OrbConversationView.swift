@@ -22,6 +22,13 @@ struct OrbConversationView: View {
     @State private var savedSilenceInterval: TimeInterval = 0.9
     @State private var crawlBeats: [CrawlBeat] = []
     @State private var isFullscreen: Bool = false
+    /// The user's declared focus for this session. When set, it appears as a chip
+    /// under the top bar and is prepended as context on the next send so Claude
+    /// keeps working toward it. Cleared with the `×` in the chip or a fresh session.
+    @State private var goal: String = ""
+    @State private var goalDraft: String = ""
+    @State private var isEditingGoal: Bool = false
+    @FocusState private var goalFieldFocused: Bool
     /// Subject-theme labels that orbit the sphere. Persisted between turns so the
     /// scene keeps its "always-alive" feel when idle — the design spec always shows
     /// three-ish satellites hovering around the orb, never an empty ring. Populated
@@ -163,13 +170,22 @@ struct OrbConversationView: View {
                     .allowsHitTesting(false)
 
                 // ── 10. Foreground UI ─────────────────────────────────────────
-                VStack {
+                VStack(spacing: 10) {
                     topBar
+                    if isEditingGoal {
+                        goalEditor
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    } else if !goal.isEmpty {
+                        goalChip
+                            .transition(.opacity)
+                    }
                     if let missing = missingPermissionMessage {
                         authErrorBanner(missing)
                     }
                     Spacer()
                 }
+                .animation(.easeInOut(duration: 0.18), value: isEditingGoal)
+                .animation(.easeInOut(duration: 0.18), value: goal.isEmpty)
 
                 // Compact state chip pinned just under the sphere. This replaces the
                 // old caption block — the actual text lives in the crawl now.
@@ -415,6 +431,10 @@ struct OrbConversationView: View {
 
             Spacer()
 
+            goalToggleButton
+
+            Spacer().frame(width: 8)
+
             Button(action: toggleFullscreen) {
                 Image(systemName: isFullscreen
                       ? "arrow.down.right.and.arrow.up.left"
@@ -437,6 +457,164 @@ struct OrbConversationView: View {
         }
         .padding(.horizontal, 22)
         .padding(.top, 18)
+    }
+
+    // MARK: - Goal
+
+    /// Toggle button in the top bar. Empty state reads "Set goal"; with a goal set
+    /// it shows a target icon so the user can quickly re-open the editor.
+    private var goalToggleButton: some View {
+        Button {
+            if isEditingGoal {
+                cancelGoalEdit()
+            } else {
+                goalDraft = goal
+                isEditingGoal = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    goalFieldFocused = true
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: goal.isEmpty ? "target" : "scope")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(goal.isEmpty ? "Set goal" : "Goal")
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(1.2)
+                    .textCase(.uppercase)
+            }
+            .foregroundStyle(goal.isEmpty ? Color.white.opacity(0.75) : Color.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(goal.isEmpty ? Color.white.opacity(0.05) : Color.white.opacity(0.14))
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .stroke(Color.white.opacity(goal.isEmpty ? 0.15 : 0.30), lineWidth: 0.5)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .help(goal.isEmpty ? "Declare what you're working toward" : "Edit or clear the current goal")
+        .accessibilityLabel(goal.isEmpty ? "Set goal" : "Edit goal")
+    }
+
+    /// Read-only chip that renders under the top bar once a goal is set. Clicking
+    /// re-enters the editor; the small `×` clears the goal without opening one.
+    private var goalChip: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "scope")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.85))
+            Text(goal)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.92))
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: 560, alignment: .leading)
+            Button {
+                clearGoal()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Color.white.opacity(0.65))
+                    .frame(width: 18, height: 18)
+                    .background(Circle().fill(Color.white.opacity(0.08)))
+            }
+            .buttonStyle(.plain)
+            .help("Clear goal")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 0.5)
+                )
+        )
+        .padding(.horizontal, 22)
+        .onTapGesture {
+            goalDraft = goal
+            isEditingGoal = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                goalFieldFocused = true
+            }
+        }
+        .accessibilityLabel("Current goal: \(goal)")
+        .accessibilityHint("Tap to edit. Use the clear button to remove.")
+    }
+
+    /// Inline editor that slides down from the top bar. Submits on Return, cancels
+    /// on Escape (bound via keyboard shortcuts on the buttons). Deliberately a
+    /// TextField rather than a popover so it composes cleanly over the black
+    /// backdrop and doesn't fight with the orb's own key-press handler.
+    private var goalEditor: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "target")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.75))
+            TextField("What are we working toward?", text: $goalDraft)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .foregroundStyle(Color.white)
+                .focused($goalFieldFocused)
+                .onSubmit(saveGoal)
+            Button("Cancel") { cancelGoalEdit() }
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.6))
+                .keyboardShortcut(.cancelAction)
+            Button("Set") { saveGoal() }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(goalDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .keyboardShortcut(.defaultAction)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.black.opacity(0.35))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.25), lineWidth: 0.5)
+                )
+        )
+        .padding(.horizontal, 22)
+    }
+
+    private func saveGoal() {
+        let trimmed = goalDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let isUpdate = !goal.isEmpty && trimmed != goal
+        let isNew = goal.isEmpty
+        goal = trimmed
+        isEditingGoal = false
+        goalFieldFocused = false
+        if isNew {
+            session.send("Setting a goal for this session:\n\n\(trimmed)\n\nKeep this in focus — every response should move us toward it.")
+            announce("Goal set: \(trimmed)")
+        } else if isUpdate {
+            session.send("Updating the session goal to:\n\n\(trimmed)\n\nReplace any prior goal focus with this.")
+            announce("Goal updated: \(trimmed)")
+        } else {
+            announce("Goal editor closed.")
+        }
+    }
+
+    private func cancelGoalEdit() {
+        isEditingGoal = false
+        goalDraft = ""
+        goalFieldFocused = false
+    }
+
+    private func clearGoal() {
+        goal = ""
+        goalDraft = ""
+        announce("Goal cleared.")
     }
 
     /// The text shown as the "live" (in-flight) beat at the bottom of the crawl —
