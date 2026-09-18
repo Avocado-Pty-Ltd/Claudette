@@ -1176,7 +1176,25 @@ final class ClaudeChatSession: ObservableObject {
     }
 
     private func completeAction(toolId: String, result: String, isError: Bool) {
-        guard let idx = actionIndexByToolId[toolId] else { return }
+        guard let idx = actionIndexByToolId[toolId], timeline.indices.contains(idx) else { return }
+        if case let .pendingQuestion(card) = timeline[idx].kind {
+            // An AskUserQuestion whose action card was swapped for the question
+            // card (see handleControlRequest). A success result just restates
+            // the answers already on the card; an error (CLI rejected our
+            // response, user declined, prompt aborted) is the only thing the
+            // card can't already show, so surface it and stop asking.
+            actionIndexByToolId.removeValue(forKey: toolId)
+            if isError {
+                appendSystem("Question failed: \(result)")
+                appendToPrettyLog("  ⎿ error: \(result)\n")
+            }
+            updatePendingQuestion(requestId: card.requestId) { q in
+                if q.status == .asking { q.status = isError ? .cancelled : .answered }
+            }
+            pendingPermissions.removeAll { $0.requestId == card.requestId }
+            if activeAction?.id == toolId { activeAction = nil }
+            return
+        }
         guard case var .action(event) = timeline[idx].kind else { return }
         event.result = result
         event.isError = isError
