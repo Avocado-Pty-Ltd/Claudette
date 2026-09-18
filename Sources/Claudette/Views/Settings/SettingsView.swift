@@ -242,27 +242,83 @@ struct SettingsView: View {
         }
     }
 
-    /// Where the user's recipes live, and how to get at them.
+    /// The user's recipes: one line each with a way to edit, reveal or
+    /// trash it, plus the folder-level controls. Recipes are plain files, so
+    /// "edit" opens the JSON in the user's editor rather than a form here —
+    /// the substance of a recipe is the `instructions` prose, and a text
+    /// editor is the right tool for that.
     private var recipesRow: some View {
         fieldRow(
             label: "Recipes",
             help: "A recipe is a saved task: where to start, which domains to stay on, your rules, and what to draft. They're plain JSON files you own — keep them in a private repo or a synced folder if you like."
         ) {
-            HStack(spacing: 10) {
-                Text(recipes.recipes.isEmpty
-                     ? "No recipes yet"
-                     : "\(recipes.recipes.count) recipe\(recipes.recipes.count == 1 ? "" : "s")")
-                    .font(Theme.Font.caption)
-                    .foregroundStyle(Theme.Palette.textSecondary)
-                Button("New…") { recipes.createTemplate(named: "New recipe") }
-                    .font(Theme.Font.micro)
-                Button("Open folder") { recipes.revealDirectory() }
-                    .font(Theme.Font.micro)
-                Button("Reload") { recipes.reload() }
-                    .font(Theme.Font.micro)
-                Spacer()
+            VStack(alignment: .leading, spacing: 8) {
+                if recipes.recipes.isEmpty {
+                    Text("No recipes yet. Type /recipe <what it should do> in the chat and Claude writes one, or start from a blank template.")
+                        .font(Theme.Font.micro)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ForEach(recipes.recipes) { recipe in
+                        recipeLine(recipe)
+                    }
+                }
+                ForEach(recipes.loadErrors, id: \.self) { err in
+                    Label(err, systemImage: "exclamationmark.triangle")
+                        .font(Theme.Font.micro)
+                        .foregroundStyle(DiffLine.removedRed)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(spacing: 10) {
+                    Button("New…") { recipes.createTemplate(named: "New recipe") }
+                        .font(Theme.Font.micro)
+                    Button("Open folder") { recipes.revealDirectory() }
+                        .font(Theme.Font.micro)
+                    Button("Reload") { recipes.reload() }
+                        .font(Theme.Font.micro)
+                    Spacer()
+                }
             }
         }
+    }
+
+    private func recipeLine(_ recipe: BrowserRecipe) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: recipe.symbolName)
+                .font(.system(size: 10))
+                .foregroundStyle(Theme.Palette.textTertiary)
+                .frame(width: 14)
+            Text(recipe.name)
+                .font(Theme.Font.caption)
+                .foregroundStyle(Theme.Palette.textPrimary)
+                .lineLimit(1)
+            Text(recipeDetail(recipe))
+                .font(Theme.Font.micro)
+                .foregroundStyle(Theme.Palette.textTertiary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+            Button("Edit") { recipes.openInEditor(id: recipe.id) }
+                .font(Theme.Font.micro)
+            Button("Reveal") { recipes.reveal(id: recipe.id) }
+                .font(Theme.Font.micro)
+            Button("Trash") { recipes.moveToTrash(id: recipe.id) }
+                .font(Theme.Font.micro)
+                .foregroundStyle(Theme.Palette.textTertiary)
+        }
+    }
+
+    /// One-line gist: where it starts, whether it can act, when it runs.
+    private func recipeDetail(_ recipe: BrowserRecipe) -> String {
+        var parts: [String] = []
+        if let host = URL(string: recipe.startURL)?.host, !host.isEmpty {
+            parts.append(host.hasPrefix("www.") ? String(host.dropFirst(4)) : host)
+        }
+        if !recipe.readOnly { parts.append("can interact") }
+        if let summary = recipe.schedule?.summary, recipe.isSchedulable {
+            parts.append(summary)
+        }
+        return parts.joined(separator: " · ")
     }
 
     /// Scheduled recipes: the master switch, what's queued, and what happened.
