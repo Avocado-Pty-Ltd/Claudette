@@ -399,6 +399,41 @@ API_KEY_ENV = {
 }
 
 
+def plain_browser_kwargs() -> dict[str, Any]:
+    """BrowserProfile settings that keep the browser the user's own.
+
+    browser-use's defaults download three third-party extensions at runtime
+    (uBlock Origin, "I still don't care about cookies", ClearURLs) and
+    side-load them with --load-extension, plus the Chrome flags that make
+    that work. Loaded into a profile the user has signed into, driven by
+    real Chrome, that is neither something the docs promised nor something
+    anti-bot systems overlook — and Chrome flags one of those switches
+    ("--extensions-on-chrome-urls") with a permanent "unsupported
+    command-line flag" infobar. The agent can dismiss a cookie banner by
+    itself; it does not need an ad blocker. So: no extensions, and none of
+    the extension-only flags.
+    """
+    kwargs: dict[str, Any] = {"enable_default_extensions": False}
+    extension_flags = [
+        "--extensions-on-chrome-urls",
+        "--disable-extensions-http-throttling",
+        "--silent-debugger-extension-api",
+    ]
+    try:
+        from browser_use import BrowserProfile
+
+        field = BrowserProfile.model_fields["ignore_default_args"]
+        base = field.default_factory() if field.default_factory else []
+        if isinstance(base, list):
+            kwargs["ignore_default_args"] = [*base, *extension_flags]
+        # `True` (ignore everything) needs no help; leave it alone.
+    except Exception:
+        # Older/newer browser-use without that field: extensions off is still
+        # the important part.
+        pass
+    return kwargs
+
+
 def build_llm(provider: str, model: str | None):
     """Instantiate the browser-use chat model for `provider`.
 
@@ -486,6 +521,7 @@ async def run(args: argparse.Namespace, spec: TaskSpec) -> int:
     emit({"type": "status", "message": "Opening the browser…"})
 
     profile_kwargs: dict[str, Any] = {"headless": args.headless, "keep_alive": False}
+    profile_kwargs.update(plain_browser_kwargs())
     if spec.allowed_domains:
         # Fencing the agent to the domains the task actually needs. Even a
         # well-behaved model wanders when a page links out; this makes wandering
@@ -610,6 +646,7 @@ async def run_sign_in(args: argparse.Namespace) -> int:
         # Survive the agent's own teardown until we're terminated.
         "keep_alive": True,
     }
+    profile_kwargs.update(plain_browser_kwargs())
     if args.user_data_dir:
         profile_kwargs["user_data_dir"] = os.path.expanduser(args.user_data_dir)
     if args.chrome_path:

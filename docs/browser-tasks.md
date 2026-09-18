@@ -145,6 +145,12 @@ Google Chrome (falling back to Chromium, Brave or Edge), so the window is the br
 you already know and the one the site sees you use every day. Leave it blank and
 browser-use downloads its own Chromium instead, which sites tend to trust less.
 
+The browser is also kept plain: browser-use normally downloads and side-loads three
+extensions of its own (an ad blocker, a cookie-banner dismisser, a URL cleaner).
+Claudette turns that off — they'd run inside a profile you've signed into, and real
+Chrome flags the switch they need with a permanent "unsupported command-line flag"
+banner. The agent can click a cookie banner itself.
+
 A task run will never sign in for you — it refuses to enter credentials and stops at
 the first login wall. So sign in yourself, once, ahead of time:
 
