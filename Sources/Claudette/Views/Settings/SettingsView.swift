@@ -42,10 +42,13 @@ extension AVSpeechSynthesisVoiceQuality {
 
 struct SettingsView: View {
     @EnvironmentObject var voice: VoiceConfig
+    @EnvironmentObject var prospect: ProspectConfig
+    @EnvironmentObject var prospectRunner: ProspectRunner
     @State private var draftKey: String = ""
     @State private var draftVoiceId: String = ""
     @State private var draftModelId: String = ""
     @State private var revealKey: Bool = false
+    @State private var revealProspectKey: Bool = false
     @State private var testState: TestState = .idle
     /// Local synthesiser used purely to preview an Apple voice from the picker.
     /// Kept separate from the app-wide SpeechOutput so a preview doesn't disturb
@@ -65,20 +68,23 @@ struct SettingsView: View {
             header
             Divider().overlay(Theme.Palette.border)
             ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
+                VStack(alignment: .leading, spacing: 26) {
                     voiceSection
+                    Divider().overlay(Theme.Palette.border)
+                    linkedInSection
                 }
                 .padding(24)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             footer
         }
-        .frame(width: 600, height: 560)
+        .frame(width: 620, height: 620)
         .background(Theme.Palette.bgPrimary)
         .onAppear {
             draftKey = voice.apiKey
             draftVoiceId = voice.voiceId
             draftModelId = voice.modelId
+            prospectRunner.refreshEnvironment(config: prospect)
         }
     }
 
@@ -103,6 +109,184 @@ struct SettingsView: View {
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
+    }
+
+    // MARK: - LinkedIn prospecting
+
+    private var linkedInSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            sectionHeading(
+                "LinkedIn prospecting",
+                subtitle: "Claudette can drive the open-source browser-use agent through LinkedIn in your own browser, looking for people worth connecting with and posts worth replying to. It reads and drafts — it never clicks Connect and never posts, so nothing goes out that you haven't read."
+            )
+
+            environmentRow
+
+            fieldRow(label: "Model provider", help: prospect.provider.keyHelp) {
+                Picker("", selection: $prospect.provider) {
+                    ForEach(ProspectProvider.allCases) { p in
+                        Text(p.label).tag(p)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+            }
+
+            if prospect.provider.needsKey {
+                fieldRow(label: "\(prospect.provider.label) API key", help: "Stored in your Keychain and handed to the agent over the environment, never on the command line.") {
+                    HStack(spacing: 8) {
+                        Group {
+                            if revealProspectKey {
+                                TextField("sk-…", text: $prospect.apiKey)
+                            } else {
+                                SecureField("sk-…", text: $prospect.apiKey)
+                            }
+                        }
+                        .textFieldStyle(.plain)
+                        .font(Theme.Font.mono)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
+
+                        Button {
+                            revealProspectKey.toggle()
+                        } label: {
+                            Image(systemName: revealProspectKey ? "eye.slash" : "eye")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Theme.Palette.textSecondary)
+                                .frame(width: 30, height: 30)
+                                .background(RoundedRectangle(cornerRadius: 6).fill(Theme.Palette.bgSecondary))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Show / hide")
+                    }
+                }
+            }
+
+            fieldRow(label: "Model", help: "Leave blank for \(prospect.provider.defaultModel).") {
+                TextField(prospect.provider.defaultModel, text: $prospect.model)
+                    .textFieldStyle(.plain)
+                    .font(Theme.Font.mono)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
+            }
+
+            fieldRow(label: "About you", help: "Two or three lines. The drafts borrow your voice from this, so a connection note sounds like you rather than like a template.") {
+                TextEditor(text: $prospect.aboutMe)
+                    .font(Theme.Font.body)
+                    .scrollContentBackground(.hidden)
+                    .frame(height: 64)
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
+            }
+
+            fieldRow(label: "Tone", help: "Optional. e.g. \u{201C}direct, a bit dry, no exclamation marks\u{201D}.") {
+                TextField("Optional", text: $prospect.tone)
+                    .textFieldStyle(.plain)
+                    .font(Theme.Font.body)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
+            }
+
+            fieldRow(label: "Chrome profile", help: "The agent reuses the LinkedIn session in this Chrome profile. Sign in there once, by hand — Claudette never sees your LinkedIn password.") {
+                HStack(spacing: 8) {
+                    TextField(ProspectConfig.defaultProfileDir, text: $prospect.profileDir)
+                        .textFieldStyle(.plain)
+                        .font(Theme.Font.monoSmall)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
+                    Button("Reset") { prospect.profileDir = ProspectConfig.defaultProfileDir }
+                        .font(Theme.Font.micro)
+                }
+            }
+
+            fieldRow(label: "Python", help: "Blank means Claudette finds one with browser-use installed. Point it at a specific interpreter to override.") {
+                TextField("auto", text: $prospect.pythonPath)
+                    .textFieldStyle(.plain)
+                    .font(Theme.Font.monoSmall)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
+            }
+
+            fieldRow(label: "Step budget", help: "Hard ceiling on agent steps per run — where the time and the token bill stop.") {
+                HStack(spacing: 14) {
+                    Slider(value: Binding(
+                        get: { Double(prospect.maxSteps) },
+                        set: { prospect.maxSteps = Int($0) }
+                    ), in: 10...200, step: 5)
+                    Text("\(prospect.maxSteps)")
+                        .font(Theme.Font.mono)
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                        .frame(width: 40, alignment: .trailing)
+                }
+            }
+        }
+    }
+
+    /// Whether browser-use is actually installed anywhere Claudette can reach,
+    /// with a one-click fix when it isn't.
+    @ViewBuilder
+    private var environmentRow: some View {
+        switch prospectRunner.environment {
+        case .ready(let interpreter, let version):
+            HStack(spacing: 8) {
+                Circle().fill(DiffLine.addedGreen).frame(width: 6, height: 6)
+                Text("browser-use \(version) — \((interpreter as NSString).abbreviatingWithTildeInPath)")
+                    .font(Theme.Font.micro)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Button("Re-check") { prospectRunner.refreshEnvironment(config: prospect) }
+                    .font(Theme.Font.micro)
+            }
+        default:
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Circle().fill(Theme.Palette.textTertiary).frame(width: 6, height: 6)
+                    Text(prospectRunner.environment.advice)
+                        .font(Theme.Font.caption)
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(spacing: 8) {
+                    Button(prospectRunner.isInstalling ? "Installing…" : "Install browser-use") {
+                        prospectRunner.installBrowserUse(config: prospect)
+                    }
+                    .disabled(prospectRunner.isInstalling)
+                    Button("Re-check") { prospectRunner.refreshEnvironment(config: prospect) }
+                        .disabled(prospectRunner.isInstalling)
+                    if prospectRunner.isInstalling {
+                        ProgressView().controlSize(.small).scaleEffect(0.7)
+                    }
+                }
+                if !prospectRunner.installLog.isEmpty {
+                    ScrollView {
+                        Text(prospectRunner.installLog)
+                            .font(Theme.Font.monoSmall)
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(height: 100)
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.codeBg))
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: Theme.Metric.cornerMd).fill(Theme.Palette.bgSecondary))
+        }
     }
 
     private var voiceSection: some View {

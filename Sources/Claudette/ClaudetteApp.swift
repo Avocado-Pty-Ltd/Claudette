@@ -7,6 +7,10 @@ struct ClaudetteApp: App {
     @StateObject private var projectStore = ProjectStore()
     @StateObject private var voiceConfig = VoiceConfig()
     @StateObject private var permissions = PermissionsCoordinator()
+    @StateObject private var prospectConfig = ProspectConfig()
+    /// One prospecting runner for the whole app — it drives a real browser, and
+    /// two of those racing each other on the same Chrome profile would collide.
+    @StateObject private var prospectRunner = ProspectRunner()
 
     var body: some Scene {
         WindowGroup {
@@ -14,6 +18,8 @@ struct ClaudetteApp: App {
                 .environmentObject(projectStore)
                 .environmentObject(voiceConfig)
                 .environmentObject(permissions)
+                .environmentObject(prospectConfig)
+                .environmentObject(prospectRunner)
                 .frame(minWidth: 900, minHeight: 600)
         }
         .windowStyle(.hiddenTitleBar)
@@ -30,6 +36,13 @@ struct ClaudetteApp: App {
                     NotificationCenter.default.post(name: .claudetteNewChat, object: nil)
                 }
                 .keyboardShortcut("t", modifiers: [.command])
+
+                Divider()
+
+                Button("LinkedIn Prospecting…") {
+                    NotificationCenter.default.post(name: .claudetteShowProspects, object: nil)
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
             }
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") {
@@ -58,4 +71,7 @@ extension Notification.Name {
     static let claudetteFillDraft = Notification.Name("claudette.fillDraft")
     static let claudetteShowResumeSheet = Notification.Name("claudette.showResumeSheet")
     static let claudetteShowSettings = Notification.Name("claudette.showSettings")
+    /// Opens the LinkedIn prospecting panel. `userInfo["goal"]` pre-fills the
+    /// goal field — that's how `/linkedin <goal>` hands off from the chat.
+    static let claudetteShowProspects = Notification.Name("claudette.showProspects")
 }

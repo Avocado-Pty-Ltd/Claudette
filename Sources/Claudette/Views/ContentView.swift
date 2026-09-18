@@ -4,9 +4,11 @@ import AppKit
 struct ContentView: View {
     @EnvironmentObject var store: ProjectStore
     @EnvironmentObject var permissions: PermissionsCoordinator
+    @EnvironmentObject var prospectRunner: ProspectRunner
     @State private var columnVisibility: NavigationSplitViewVisibility = .doubleColumn
     @State private var showingSettings = false
     @State private var showingOnboarding = false
+    @State private var showingProspects = false
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -22,6 +24,17 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showingOnboarding) {
             PermissionsOnboardingView()
+        }
+        // Owned here rather than by ChatView so ⇧⌘L and /linkedin still work
+        // when no project is selected.
+        .sheet(isPresented: $showingProspects) {
+            ProspectPanel(runner: prospectRunner)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .claudetteShowProspects)) { note in
+            if let goal = note.userInfo?["goal"] as? String, !goal.isEmpty {
+                prospectRunner.prefill(goal: goal)
+            }
+            showingProspects = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .claudetteShowSettings)) { _ in
             showingSettings = true

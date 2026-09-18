@@ -15,6 +15,7 @@ Claude Code is powerful but its CLI is a wall of text. Claudette turns each run 
 - **A narrator strip** at the bottom of the chat tells you what Claude is doing *right now* — "Reading src/foo.ts", "Editing package.json", "Running: npm test" — so you never lose the thread while responses stream.
 - **Prose is prose.** Assistant text renders as serif Markdown with proper spacing, code fences, lists, quotes and inline code.
 - **The whole app breathes** — spring transitions on new cards, gentle pulses on running actions, no jitter, no cognitive tax.
+- **It can go out and look things up.** Claudette drives [browser-use](https://github.com/browser-use/browser-use) through LinkedIn in your own browser and comes back with people worth connecting with and posts worth replying to — each with a draft. See [LinkedIn prospecting](#linkedin-prospecting).
 
 ## Install
 
@@ -74,10 +75,17 @@ Sources/Claudette/
 │   └── TimelineItem.swift       # flat timeline: user/assistant/thinking/action/system
 ├── Services/
 │   ├── ProjectStore.swift       # persists to ~/Library/Application Support/Claudette
-│   └── ClaudeCLIService.swift   # spawns `claude` with stream-json IO; pairs tool_use↔tool_result
+│   ├── ClaudeCLIService.swift   # spawns `claude` with stream-json IO; pairs tool_use↔tool_result
+│   └── BrowserUseService.swift  # spawns the browser-use sidecar; parses its JSONL events
+├── Resources/
+│   └── linkedin_prospector/
+│       └── prospector.py        # browser-use agent: reads LinkedIn, drafts, never sends
 └── Views/
     ├── ContentView.swift        # NavigationSplitView + SessionHolder
     ├── Sidebar/                 # project list + add-project
+    ├── Prospect/
+    │   ├── ProspectPanel.swift     # goal → live trace → reviewable drafts
+    │   └── ProspectCard.swift      # one contact, editable note, copy + open
     ├── Chat/
     │   ├── ChatView.swift       # main timeline scroller + activity ticker overlay
     │   ├── TimelineItemView.swift  # dispatcher + UserMessageView + AssistantTextView + ThinkingView + SystemNoticeView
@@ -110,12 +118,39 @@ with `cwd` set to the selected project folder. JSON events are parsed on the mai
 - `stream_event` (partial) → appends text deltas to the current streaming assistant item
 - `result` → finalizes streaming, clears active action
 
+## LinkedIn prospecting
+
+Press **⇧⌘L** (or type `/linkedin <goal>` in the chat box), describe what you're trying
+to do, and Claudette drives [browser-use](https://github.com/browser-use/browser-use)
+through LinkedIn in your own logged-in browser:
+
+```
+/linkedin find Sydney-based founders of seed-stage AI infra startups,
+          and posts of theirs worth replying to
+```
+
+You get back a card per person — who they are, why it picked them, and an editable
+connection note — plus drafted comments for the posts worth engaging on. **Copy**,
+**Open profile**, paste, send.
+
+**Claudette drafts; you send.** It never clicks Connect and never posts a comment.
+LinkedIn's User Agreement prohibits automated invitations and posts, and a note nobody
+read isn't worth sending anyway — the value is in the research, not the clicking.
+
+Setup is three things, all in **Settings → LinkedIn**: install browser-use (one click —
+Claudette builds its own virtualenv), add an API key for the model that drives the
+browser, and sign in to LinkedIn once in the Chrome profile it manages. Claudette never
+sees your LinkedIn password.
+
+Full guide: [docs/linkedin-prospecting.md](docs/linkedin-prospecting.md).
+
 ## Keyboard shortcuts
 
 | Shortcut | Action                    |
 | -------- | ------------------------- |
 | ⌘N       | Add project folder        |
 | ⌘T       | Start a new chat          |
+| ⇧⌘L      | LinkedIn prospecting      |
 | ⌘⏎ / ⏎   | Send message              |
 | ⇧⏎ / ⌥⏎  | Newline in the input      |
 
@@ -127,4 +162,7 @@ Projects and their last session IDs live at:
 ~/Library/Application Support/Claudette/projects.json
 ```
 
-Delete it to reset the app.
+Delete it to reset the app. LinkedIn prospecting adds two more directories under the
+same folder — `browser-use-venv/` (the managed Python environment) and
+`linkedin-profile/` (the Chrome profile holding your LinkedIn session). API keys live
+in the Keychain, not on disk.
