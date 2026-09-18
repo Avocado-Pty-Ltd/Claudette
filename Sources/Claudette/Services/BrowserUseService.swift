@@ -145,9 +145,13 @@ final class BrowserTaskRunner: ObservableObject {
         case closed
         case opening
         case open
+        /// Done was pressed; the sidecar is asking Chrome to shut down and
+        /// flush the profile. Still "active": nothing else may touch the
+        /// profile until the process has actually exited.
+        case closing
         case failed(String)
 
-        var isActive: Bool { self == .opening || self == .open }
+        var isActive: Bool { self == .opening || self == .open || self == .closing }
     }
 
     private var process: Process?
@@ -171,6 +175,14 @@ final class BrowserTaskRunner: ObservableObject {
     func run(spec: BrowserTaskSpec, config: BrowserAgentConfig) {
         let trimmedGoal = spec.goal.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedGoal.isEmpty, !state.isBusy else { return }
+        // One Chrome per profile. Launching a run while the sign-in browser
+        // is open (or still flushing) finds the profile locked, and browser-use
+        // quietly falls back to a throwaway copy — the run then looks signed out.
+        guard !signIn.isActive else {
+            state = .failed
+            lastError = "The sign-in browser is still open. Press Done — close it in Settings, then run again."
+            return
+        }
 
         guard let sidecar = Self.sidecarURL() else {
             state = .failed
@@ -397,10 +409,15 @@ final class BrowserTaskRunner: ObservableObject {
                 guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
                 Task { @MainActor in self?.appendLog(text) }
             }
-            task.terminationHandler = { [weak self] _ in
+            task.terminationHandler = { [weak self, weak task] _ in
                 Task { @MainActor in
-                    self?.signInProcess = nil
-                    if self?.signIn.isActive == true { self?.signIn = .closed }
+                    guard let self else { return }
+                    // Only the process we're currently tracking may clear the
+                    // handle or flip the state — a stale handler from an
+                    // earlier session must not detach a newer one.
+                    guard let task, self.signInProcess === task else { return }
+                    self.signInProcess = nil
+                    if self.signIn.isActive { self.signIn = .closed }
                 }
             }
 
@@ -414,14 +431,20 @@ final class BrowserTaskRunner: ObservableObject {
     }
 
     /// Close the sign-in browser. Whatever the user signed into persists in the
-    /// profile directory, which is the point.
+    /// profile directory, which is the point — and that persistence is exactly
+    /// why this doesn't flip straight to `.closed`: the sidecar asks Chrome to
+    /// shut down cleanly and waits for it to finish writing the profile, which
+    /// can take several seconds. The state stays `.closing` (still active, so
+    /// no second browser and no task run can touch the profile) until the
+    /// termination handler sees the process actually exit.
     func finishSignIn() {
         guard let signInProcess, signInProcess.isRunning else {
+            signInProcess = nil
             signIn = .closed
             return
         }
+        signIn = .closing
         signInProcess.terminate()
-        signIn = .closed
     }
 
     private func handleSignInOutput(_ text: String) {

@@ -461,6 +461,13 @@ struct SettingsView: View {
                         Button("Done — close it") { browserRunner.finishSignIn() }
                             .font(Theme.Font.micro)
                             .buttonStyle(.borderedProminent)
+                    case .closing:
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small).scaleEffect(0.7)
+                            Text("Saving your session…")
+                                .font(Theme.Font.micro)
+                                .foregroundStyle(Theme.Palette.textTertiary)
+                        }
                     }
                 }
 
@@ -474,7 +481,7 @@ struct SettingsView: View {
                         .font(Theme.Font.micro)
                         .foregroundStyle(DiffLine.removedRed)
                         .fixedSize(horizontal: false, vertical: true)
-                case .closed, .opening:
+                case .closed, .opening, .closing:
                     if browserRunner.state.isBusy {
                         Text("A task is running — stop it first.")
                             .font(Theme.Font.micro)
