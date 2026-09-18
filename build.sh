@@ -31,6 +31,23 @@ mkdir -p "${MACOS_DIR}" "${RES_DIR}"
 cp "${BIN}" "${MACOS_DIR}/${APP_NAME}"
 cp Info.plist "${CONTENTS}/Info.plist"
 
+# Stamp the version. Info.plist in the repo carries a placeholder; the real
+# number comes from the release tag (APP_VERSION, e.g. 0.1.7) and the CI run
+# (APP_BUILD), so About and the Finder Get Info window agree with the release.
+# A local build with neither set falls back to the nearest tag so a dev build
+# is still identifiable rather than forever "0.1.0".
+if [[ -z "${APP_VERSION:-}" ]]; then
+    APP_VERSION="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null | sed 's/^v//' || true)"
+fi
+if [[ -n "${APP_VERSION}" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${APP_VERSION}" "${CONTENTS}/Info.plist"
+fi
+if [[ -z "${APP_BUILD:-}" ]]; then
+    APP_BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
+fi
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${APP_BUILD}" "${CONTENTS}/Info.plist"
+echo "▸ Version ${APP_VERSION:-unknown} (build ${APP_BUILD})"
+
 # Copy any bundled resources (from the SwiftPM bundle) into Resources/
 BUNDLED_RESOURCES="${BIN_PATH}/${APP_NAME}_${APP_NAME}.bundle"
 if [[ -d "${BUNDLED_RESOURCES}" ]]; then
