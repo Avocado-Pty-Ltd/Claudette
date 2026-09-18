@@ -399,6 +399,56 @@ API_KEY_ENV = {
 }
 
 
+def plain_browser_kwargs() -> dict[str, Any]:
+    """BrowserProfile settings that keep the browser the user's own.
+
+    browser-use's defaults download three third-party extensions at runtime
+    (uBlock Origin, "I still don't care about cookies", ClearURLs) and
+    side-load them with --load-extension, plus the Chrome flags that make
+    that work. Loaded into a profile the user has signed into, driven by
+    real Chrome, that is neither something the docs promised nor something
+    anti-bot systems overlook — and Chrome flags one of those switches
+    ("--extensions-on-chrome-urls") with a permanent "unsupported
+    command-line flag" infobar. The agent can dismiss a cookie banner by
+    itself; it does not need an ad blocker. So: no extensions, and none of
+    the extension-only flags.
+    """
+    kwargs: dict[str, Any] = {"enable_default_extensions": False}
+    extension_flags = [
+        "--extensions-on-chrome-urls",
+        "--disable-extensions-http-throttling",
+        "--silent-debugger-extension-api",
+    ]
+    try:
+        from browser_use import BrowserProfile
+
+        field = BrowserProfile.model_fields["ignore_default_args"]
+        # Pydantic declares a default either as a factory or as a value;
+        # honour whichever this browser-use version uses so we extend its
+        # list rather than replace it.
+        if field.default_factory is not None:
+            base = field.default_factory()
+        else:
+            base = field.default
+        if base is True:
+            # "Ignore every default arg" already covers the extension flags.
+            kwargs["ignore_default_args"] = True
+        elif isinstance(base, (list, tuple)):
+            merged = list(base)
+            merged += [f for f in extension_flags if f not in merged]
+            kwargs["ignore_default_args"] = merged
+        else:
+            # Unset / PydanticUndefined / something new: don't guess at the
+            # defaults, just add ours — the field's own default still applies
+            # to anything we don't name when browser-use merges.
+            kwargs["ignore_default_args"] = list(extension_flags)
+    except Exception:
+        # Older/newer browser-use without that field: extensions off is still
+        # the important part.
+        pass
+    return kwargs
+
+
 def build_llm(provider: str, model: str | None):
     """Instantiate the browser-use chat model for `provider`.
 
@@ -486,6 +536,7 @@ async def run(args: argparse.Namespace, spec: TaskSpec) -> int:
     emit({"type": "status", "message": "Opening the browser…"})
 
     profile_kwargs: dict[str, Any] = {"headless": args.headless, "keep_alive": False}
+    profile_kwargs.update(plain_browser_kwargs())
     if spec.allowed_domains:
         # Fencing the agent to the domains the task actually needs. Even a
         # well-behaved model wanders when a page links out; this makes wandering
@@ -610,6 +661,7 @@ async def run_sign_in(args: argparse.Namespace) -> int:
         # Survive the agent's own teardown until we're terminated.
         "keep_alive": True,
     }
+    profile_kwargs.update(plain_browser_kwargs())
     if args.user_data_dir:
         profile_kwargs["user_data_dir"] = os.path.expanduser(args.user_data_dir)
     if args.chrome_path:
