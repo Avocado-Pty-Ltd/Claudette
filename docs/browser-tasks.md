@@ -165,6 +165,12 @@ closes the browser, which would leave you no moment in which to sign in.)
 Claudette never sees, asks for, or stores a site password. If a run finds itself signed
 out it stops and says so in `blocked_reason` rather than trying to sign in.
 
+**Done — close it** asks Chrome to shut down properly (CDP `Browser.close`) and waits
+for it, rather than signalling the process. That matters: Chrome writes cookies to the
+profile in batches roughly every 30 seconds, and a login made in the last half-minute
+before a hard close never reaches disk — which looks exactly like "signing in doesn't
+persist". Task runs close the same way, so a session a site refreshed mid-run is kept.
+
 ## Schedules
 
 A recipe with a `schedule` runs by itself:

@@ -447,6 +447,43 @@ def plain_browser_kwargs() -> dict[str, Any]:
         # the important part.
         pass
     return kwargs
+async def close_browser_gracefully(session: Any) -> None:
+    """Ask Chrome to shut itself down before browser-use tears it down.
+
+    browser-use's kill() ends Chrome with SIGTERM and, five seconds later,
+    SIGKILL. Chrome commits cookies and site data to the profile in batches
+    — roughly every 30 s — so anything set after the last batch is lost on a
+    signal. For the sign-in browser that is almost always the login itself:
+    the user signs in and clicks Done within the window. CDP Browser.close
+    runs Chrome's normal shutdown, which flushes every store; wait for the
+    process to actually exit before handing over to kill(), whose SIGTERM
+    then finds nothing left to hurt.
+    """
+    watchdog = getattr(session, "_local_browser_watchdog", None)
+    proc = getattr(watchdog, "_subprocess", None) if watchdog is not None else None
+    try:
+        await asyncio.wait_for(session.cdp_client.send.Browser.close(), timeout=5)
+    except Exception:
+        # Not connected, or Chrome already gone — kill() handles the rest.
+        return
+    if proc is None:
+        await asyncio.sleep(1.0)
+        return
+
+    def gone() -> bool:
+        # Chrome is our child, so after exit it lingers as a zombie until
+        # reaped; a bare os.kill(pid, 0) would still "succeed" on that.
+        try:
+            import psutil
+
+            return (not proc.is_running()) or proc.status() == psutil.STATUS_ZOMBIE
+        except Exception:
+            return True
+
+    for _ in range(100):  # up to 10 s for the profile to finish writing
+        if gone():
+            return
+        await asyncio.sleep(0.1)
 
 
 def build_llm(provider: str, model: str | None):
@@ -604,6 +641,10 @@ async def run(args: argparse.Namespace, spec: TaskSpec) -> int:
         emit({"type": "error", "message": f"{type(exc).__name__}: {exc}", "kind": "agent"})
         return 1
     finally:
+        # Same courtesy as the sign-in browser: a run that got re-authenticated
+        # by a redirect, or whose site refreshed its session cookies, keeps
+        # that state for next time instead of losing the last 30 s of writes.
+        await close_browser_gracefully(browser_session)
         try:
             await browser_session.kill()
         except Exception:
@@ -686,6 +727,7 @@ async def run_sign_in(args: argparse.Namespace) -> int:
         emit({"type": "error", "message": f"{type(exc).__name__}: {exc}", "kind": "signin"})
         return 1
     finally:
+        await close_browser_gracefully(session)
         try:
             await session.kill()
         except Exception:
