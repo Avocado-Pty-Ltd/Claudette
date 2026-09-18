@@ -447,43 +447,110 @@ def plain_browser_kwargs() -> dict[str, Any]:
         # the important part.
         pass
     return kwargs
-async def close_browser_gracefully(session: Any) -> None:
-    """Ask Chrome to shut itself down before browser-use tears it down.
+def browser_process(session: Any, user_data_dir: str | None) -> Any:
+    """The Chrome process this session launched, as a psutil.Process, or None.
+
+    browser-use keeps it on a private attribute, and Claudette installs
+    browser-use unpinned, so a rename must not silently disable the graceful
+    close. Fast path: the private handle. Fallback: it's our child process,
+    and we know the profile we asked for — scan our descendants for the
+    Chrome whose command line names that --user-data-dir.
+    """
+    try:
+        import psutil
+    except Exception:
+        return None
+
+    watchdog = getattr(session, "_local_browser_watchdog", None)
+    proc = getattr(watchdog, "_subprocess", None) if watchdog is not None else None
+    if proc is not None and hasattr(proc, "is_running"):
+        try:
+            if proc.is_running():
+                return proc
+        except Exception:
+            pass
+
+    if not user_data_dir:
+        return None
+    wanted = os.path.realpath(os.path.expanduser(user_data_dir))
+    try:
+        for child in psutil.Process().children(recursive=True):
+            try:
+                argv = child.cmdline()
+            except Exception:
+                continue
+            for arg in argv:
+                if arg.startswith("--user-data-dir=") and os.path.realpath(arg.split("=", 1)[1]) == wanted:
+                    # Chrome's helpers inherit the flag; the browser process is
+                    # the topmost one carrying it.
+                    return child
+    except Exception:
+        pass
+    return None
+
+
+def process_gone(proc: Any) -> bool:
+    """True once Chrome has exited. It is our child, so it lingers as a
+    zombie until reaped; treat that as gone too."""
+    try:
+        import psutil
+
+        return (not proc.is_running()) or proc.status() == psutil.STATUS_ZOMBIE
+    except Exception:
+        return True
+
+
+async def close_browser_gracefully(session: Any, user_data_dir: str | None = None) -> None:
+    """Ask Chrome to shut itself down, and make sure it does, before
+    browser-use tears it down.
 
     browser-use's kill() ends Chrome with SIGTERM and, five seconds later,
     SIGKILL. Chrome commits cookies and site data to the profile in batches
     — roughly every 30 s — so anything set after the last batch is lost on a
     signal. For the sign-in browser that is almost always the login itself:
     the user signs in and clicks Done within the window. CDP Browser.close
-    runs Chrome's normal shutdown, which flushes every store; wait for the
-    process to actually exit before handing over to kill(), whose SIGTERM
-    then finds nothing left to hurt.
+    runs Chrome's normal shutdown, which flushes every store.
+
+    Sequence: send Browser.close; wait for the process to exit (a slow
+    reply to the close call is NOT a reason to give up — Chrome may simply
+    be busy flushing); and if it still hasn't exited, end it ourselves,
+    because once CDP is down browser-use's kill() can't be relied on — its
+    kill path first awaits a storage-state save over CDP and swallows the
+    failure, leaving Chrome running.
     """
-    watchdog = getattr(session, "_local_browser_watchdog", None)
-    proc = getattr(watchdog, "_subprocess", None) if watchdog is not None else None
+    proc = browser_process(session, user_data_dir)
+
     try:
         await asyncio.wait_for(session.cdp_client.send.Browser.close(), timeout=5)
+    except asyncio.TimeoutError:
+        # Close was delivered; Chrome is just slow to answer while it writes
+        # the profile. Keep waiting on the process rather than killing it.
+        pass
     except Exception:
-        # Not connected, or Chrome already gone — kill() handles the rest.
-        return
+        # Not connected, or Chrome already gone — nothing to flush.
+        if proc is None or process_gone(proc):
+            return
+
     if proc is None:
         await asyncio.sleep(1.0)
         return
 
-    def gone() -> bool:
-        # Chrome is our child, so after exit it lingers as a zombie until
-        # reaped; a bare os.kill(pid, 0) would still "succeed" on that.
-        try:
-            import psutil
-
-            return (not proc.is_running()) or proc.status() == psutil.STATUS_ZOMBIE
-        except Exception:
-            return True
-
-    for _ in range(100):  # up to 10 s for the profile to finish writing
-        if gone():
+    for _ in range(150):  # up to 15 s for the profile to finish writing
+        if process_gone(proc):
             return
         await asyncio.sleep(0.1)
+
+    # Still here: end it ourselves so nothing outlives the sidecar, and so a
+    # later launch doesn't find the profile locked.
+    try:
+        proc.terminate()
+        for _ in range(50):
+            if process_gone(proc):
+                return
+            await asyncio.sleep(0.1)
+        proc.kill()
+    except Exception:
+        pass
 
 
 def build_llm(provider: str, model: str | None):
@@ -644,7 +711,7 @@ async def run(args: argparse.Namespace, spec: TaskSpec) -> int:
         # Same courtesy as the sign-in browser: a run that got re-authenticated
         # by a redirect, or whose site refreshed its session cookies, keeps
         # that state for next time instead of losing the last 30 s of writes.
-        await close_browser_gracefully(browser_session)
+        await close_browser_gracefully(browser_session, args.user_data_dir)
         try:
             await browser_session.kill()
         except Exception:
@@ -727,7 +794,7 @@ async def run_sign_in(args: argparse.Namespace) -> int:
         emit({"type": "error", "message": f"{type(exc).__name__}: {exc}", "kind": "signin"})
         return 1
     finally:
-        await close_browser_gracefully(session)
+        await close_browser_gracefully(session, args.user_data_dir)
         try:
             await session.kill()
         except Exception:
