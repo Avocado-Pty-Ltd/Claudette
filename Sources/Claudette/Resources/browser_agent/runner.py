@@ -423,10 +423,25 @@ def plain_browser_kwargs() -> dict[str, Any]:
         from browser_use import BrowserProfile
 
         field = BrowserProfile.model_fields["ignore_default_args"]
-        base = field.default_factory() if field.default_factory else []
-        if isinstance(base, list):
-            kwargs["ignore_default_args"] = [*base, *extension_flags]
-        # `True` (ignore everything) needs no help; leave it alone.
+        # Pydantic declares a default either as a factory or as a value;
+        # honour whichever this browser-use version uses so we extend its
+        # list rather than replace it.
+        if field.default_factory is not None:
+            base = field.default_factory()
+        else:
+            base = field.default
+        if base is True:
+            # "Ignore every default arg" already covers the extension flags.
+            kwargs["ignore_default_args"] = True
+        elif isinstance(base, (list, tuple)):
+            merged = list(base)
+            merged += [f for f in extension_flags if f not in merged]
+            kwargs["ignore_default_args"] = merged
+        else:
+            # Unset / PydanticUndefined / something new: don't guess at the
+            # defaults, just add ours — the field's own default still applies
+            # to anything we don't name when browser-use merges.
+            kwargs["ignore_default_args"] = list(extension_flags)
     except Exception:
         # Older/newer browser-use without that field: extensions off is still
         # the important part.
