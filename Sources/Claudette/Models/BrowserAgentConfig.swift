@@ -92,7 +92,10 @@ final class BrowserAgentConfig: ObservableObject {
     @Published var pythonPath: String {
         didSet { UserDefaults.standard.set(pythonPath, forKey: Self.pythonPathKey) }
     }
-    /// Empty means "let browser-use pick its own Chromium".
+    /// The browser binary the agent drives. Empty means "let browser-use pick
+    /// its own Chromium" — which is a separate, Chromium-branded download that
+    /// sites like LinkedIn treat with more suspicion than real Chrome. See
+    /// `defaultChromePath` for why the default is the user's own Chrome.
     @Published var chromePath: String {
         didSet { UserDefaults.standard.set(chromePath, forKey: Self.chromePathKey) }
     }
@@ -141,6 +144,22 @@ final class BrowserAgentConfig: ObservableObject {
         supportDir.appendingPathComponent("browser-profile", isDirectory: true).path
     }
 
+    /// The user's installed Chrome (or Chromium/Brave/Edge, in that order), or
+    /// empty if none — in which case browser-use downloads its own Chromium.
+    /// Driving the real Chrome binary means the window looks and behaves like
+    /// the browser the user already knows, and it is the same executable the
+    /// site sees every day; it's still a separate *profile* (see profileDir)
+    /// because Chrome refuses automation on a profile that's already open.
+    nonisolated static var defaultChromePath: String {
+        let candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) } ?? ""
+    }
+
     /// Where the managed virtualenv lives when the user installs browser-use from
     /// Settings. Inside Application Support so uninstalling Claudette takes it too.
     nonisolated static var managedVenvDir: URL {
@@ -154,7 +173,10 @@ final class BrowserAgentConfig: ObservableObject {
         self.apiKey = KeychainStore.get(Self.keychainAccount(for: prov)) ?? ""
         self.model = d.string(forKey: Self.modelKey) ?? ""
         self.pythonPath = d.string(forKey: Self.pythonPathKey) ?? ""
-        self.chromePath = d.string(forKey: Self.chromePathKey) ?? ""
+        // nil (never set) → detect the user's Chrome; "" (user cleared it) →
+        // browser-use's own Chromium, which is what the empty string means
+        // on the sidecar's command line.
+        self.chromePath = d.string(forKey: Self.chromePathKey) ?? Self.defaultChromePath
         self.profileDir = d.string(forKey: Self.profileDirKey) ?? Self.defaultProfileDir
         self.headless = d.bool(forKey: Self.headlessKey)
         // UserDefaults hands back 0 for a missing integer, so treat 0 as "unset".

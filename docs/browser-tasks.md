@@ -137,6 +137,14 @@ paywall or rate limit.
 The agent drives a persistent browser profile at
 `~/Library/Application Support/Claudette/browser-profile`.
 
+That is deliberately **not** your everyday Chrome profile, so your existing logins
+don't carry over. It can't be: Chrome locks a profile that's already open, and recent
+Chrome refuses automation on the default profile altogether. What *is* your own is the
+browser binary — **Settings → Browser agent → Chrome** defaults to your installed
+Google Chrome (falling back to Chromium, Brave or Edge), so the window is the browser
+you already know and the one the site sees you use every day. Leave it blank and
+browser-use downloads its own Chromium instead, which sites tend to trust less.
+
 A task run will never sign in for you — it refuses to enter credentials and stops at
 the first login wall. So sign in yourself, once, ahead of time:
 

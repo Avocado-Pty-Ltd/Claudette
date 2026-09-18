@@ -201,7 +201,7 @@ struct SettingsView: View {
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
             }
 
-            fieldRow(label: "Browser profile", help: "The agent reuses whatever you're signed into in this profile. Claudette never sees your passwords.") {
+            fieldRow(label: "Browser profile", help: "A separate profile just for the agent — it can't borrow your everyday Chrome profile, because Chrome refuses automation on a profile that's already open. It starts signed out: use Sign in to a site below once, and the session persists for every later run. Claudette never sees your passwords.") {
                 HStack(spacing: 8) {
                     TextField(BrowserAgentConfig.defaultProfileDir, text: $browser.profileDir)
                         .textFieldStyle(.plain)
@@ -211,6 +211,20 @@ struct SettingsView: View {
                         .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
                     Button("Reset") { browser.profileDir = BrowserAgentConfig.defaultProfileDir }
+                        .font(Theme.Font.micro)
+                }
+            }
+
+            fieldRow(label: "Chrome", help: "The browser the agent drives. Defaults to your installed Chrome so the window is the browser you already know; blank makes browser-use download its own Chromium, which sites tend to trust less.") {
+                HStack(spacing: 8) {
+                    TextField("browser-use's own Chromium", text: $browser.chromePath)
+                        .textFieldStyle(.plain)
+                        .font(Theme.Font.monoSmall)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
+                    Button("Detect") { browser.chromePath = BrowserAgentConfig.defaultChromePath }
                         .font(Theme.Font.micro)
                 }
             }

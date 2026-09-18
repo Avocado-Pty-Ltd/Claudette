@@ -105,7 +105,15 @@ jobs:
           xcodebuild -version
 
       - name: Build Claudette.app
-        run: ./build.sh
+        env:
+          # The tag is the version of record; build.sh writes it into the
+          # bundle's Info.plist so About shows the release, not the
+          # placeholder committed in the repo.
+          APP_VERSION: ${{ steps.tag.outputs.name }}
+          APP_BUILD: ${{ github.run_number }}
+        run: |
+          export APP_VERSION="${APP_VERSION#v}"
+          ./build.sh
 
       - name: Zip .app
         run: |
