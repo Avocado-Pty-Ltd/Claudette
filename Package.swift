@@ -12,7 +12,14 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "Claudette",
-            path: "Sources/Claudette"
+            path: "Sources/Claudette",
+            resources: [
+                // The browser-use sidecar ships verbatim inside the app bundle
+                // and is run by whichever Python has browser-use installed.
+                // `.copy` keeps the directory structure so Bundle.module finds
+                // it at browser_agent/runner.py.
+                .copy("Resources/browser_agent")
+            ]
         )
     ]
 )

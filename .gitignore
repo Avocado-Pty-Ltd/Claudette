@@ -22,5 +22,9 @@ secrets/
 # Local Claude Code state (per-user session cache)
 .claude/
 
+# Python bytecode from the bundled browser-agent sidecar
+__pycache__/
+*.pyc
+
 # macOS
 .DS_Store

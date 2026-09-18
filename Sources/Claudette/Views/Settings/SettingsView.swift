@@ -42,10 +42,16 @@ extension AVSpeechSynthesisVoiceQuality {
 
 struct SettingsView: View {
     @EnvironmentObject var voice: VoiceConfig
+    @EnvironmentObject var browser: BrowserAgentConfig
+    @EnvironmentObject var browserRunner: BrowserTaskRunner
+    @EnvironmentObject var recipes: RecipeStore
+    @EnvironmentObject var scheduler: TaskScheduler
     @State private var draftKey: String = ""
     @State private var draftVoiceId: String = ""
     @State private var draftModelId: String = ""
     @State private var revealKey: Bool = false
+    @State private var revealBrowserKey: Bool = false
+    @State private var signInURL: String = ""
     @State private var testState: TestState = .idle
     /// Local synthesiser used purely to preview an Apple voice from the picker.
     /// Kept separate from the app-wide SpeechOutput so a preview doesn't disturb
@@ -65,20 +71,24 @@ struct SettingsView: View {
             header
             Divider().overlay(Theme.Palette.border)
             ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
+                VStack(alignment: .leading, spacing: 26) {
                     voiceSection
+                    Divider().overlay(Theme.Palette.border)
+                    browserAgentSection
                 }
                 .padding(24)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             footer
         }
-        .frame(width: 600, height: 560)
+        .frame(width: 640, height: 660)
         .background(Theme.Palette.bgPrimary)
         .onAppear {
             draftKey = voice.apiKey
             draftVoiceId = voice.voiceId
             draftModelId = voice.modelId
+            browserRunner.refreshEnvironment(config: browser)
+            recipes.reload()
         }
     }
 
@@ -103,6 +113,362 @@ struct SettingsView: View {
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
+    }
+
+    // MARK: - Browser agent
+
+    private var browserAgentSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            sectionHeading(
+                "Browser agent",
+                subtitle: "Claudette can drive the open-source browser-use agent through a website in your own browser and report back what it found. Where it goes and what counts as a good result come from your own recipe files — Claudette ships none, and none live in its repository."
+            )
+
+            environmentRow
+
+            fieldRow(label: "Model provider", help: browser.provider.keyHelp) {
+                Picker("", selection: $browser.provider) {
+                    ForEach(BrowserAgentProvider.allCases) { p in
+                        Text(p.label).tag(p)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+            }
+
+            if browser.provider.needsKey {
+                fieldRow(label: "\(browser.provider.label) API key", help: "Stored in your Keychain and handed to the agent over the environment, never on the command line.") {
+                    HStack(spacing: 8) {
+                        Group {
+                            if revealBrowserKey {
+                                TextField("sk-…", text: $browser.apiKey)
+                            } else {
+                                SecureField("sk-…", text: $browser.apiKey)
+                            }
+                        }
+                        .textFieldStyle(.plain)
+                        .font(Theme.Font.mono)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
+
+                        Button {
+                            revealBrowserKey.toggle()
+                        } label: {
+                            Image(systemName: revealBrowserKey ? "eye.slash" : "eye")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Theme.Palette.textSecondary)
+                                .frame(width: 30, height: 30)
+                                .background(RoundedRectangle(cornerRadius: 6).fill(Theme.Palette.bgSecondary))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Show / hide")
+                    }
+                }
+            }
+
+            fieldRow(label: "Model", help: "Leave blank for \(browser.provider.defaultModel).") {
+                TextField(browser.provider.defaultModel, text: $browser.model)
+                    .textFieldStyle(.plain)
+                    .font(Theme.Font.mono)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
+            }
+
+            recipesRow
+            schedulingRow
+
+            fieldRow(label: "About you", help: "Two or three lines. Anything the agent drafts borrows its voice from this, so it reads like you rather than like a template.") {
+                TextEditor(text: $browser.persona)
+                    .font(Theme.Font.body)
+                    .scrollContentBackground(.hidden)
+                    .frame(height: 64)
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
+            }
+
+            fieldRow(label: "Tone", help: "Optional. e.g. \u{201C}direct, a bit dry, no exclamation marks\u{201D}.") {
+                TextField("Optional", text: $browser.tone)
+                    .textFieldStyle(.plain)
+                    .font(Theme.Font.body)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
+            }
+
+            fieldRow(label: "Browser profile", help: "The agent reuses whatever you're signed into in this profile. Claudette never sees your passwords.") {
+                HStack(spacing: 8) {
+                    TextField(BrowserAgentConfig.defaultProfileDir, text: $browser.profileDir)
+                        .textFieldStyle(.plain)
+                        .font(Theme.Font.monoSmall)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
+                    Button("Reset") { browser.profileDir = BrowserAgentConfig.defaultProfileDir }
+                        .font(Theme.Font.micro)
+                }
+            }
+
+            signInRow
+
+            fieldRow(label: "Python", help: "Blank means Claudette finds one with browser-use installed. Point it at a specific interpreter to override.") {
+                TextField("auto", text: $browser.pythonPath)
+                    .textFieldStyle(.plain)
+                    .font(Theme.Font.monoSmall)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
+            }
+
+            fieldRow(label: "Step budget", help: "Hard ceiling on agent steps per run — where the time and the token bill stop.") {
+                HStack(spacing: 14) {
+                    Slider(value: Binding(
+                        get: { Double(browser.maxSteps) },
+                        set: { browser.maxSteps = Int($0) }
+                    ), in: 10...200, step: 5)
+                    Text("\(browser.maxSteps)")
+                        .font(Theme.Font.mono)
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                        .frame(width: 40, alignment: .trailing)
+                }
+            }
+        }
+    }
+
+    /// Where the user's recipes live, and how to get at them.
+    private var recipesRow: some View {
+        fieldRow(
+            label: "Recipes",
+            help: "A recipe is a saved task: where to start, which domains to stay on, your rules, and what to draft. They're plain JSON files you own — keep them in a private repo or a synced folder if you like."
+        ) {
+            HStack(spacing: 10) {
+                Text(recipes.recipes.isEmpty
+                     ? "No recipes yet"
+                     : "\(recipes.recipes.count) recipe\(recipes.recipes.count == 1 ? "" : "s")")
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                Button("New…") { recipes.createTemplate(named: "New recipe") }
+                    .font(Theme.Font.micro)
+                Button("Open folder") { recipes.revealDirectory() }
+                    .font(Theme.Font.micro)
+                Button("Reload") { recipes.reload() }
+                    .font(Theme.Font.micro)
+                Spacer()
+            }
+        }
+    }
+
+    /// Scheduled recipes: the master switch, what's queued, and what happened.
+    @ViewBuilder
+    private var schedulingRow: some View {
+        let scheduled = recipes.recipes.filter(\.isSchedulable)
+        VStack(alignment: .leading, spacing: 10) {
+            Toggle(isOn: $scheduler.isEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Run scheduled recipes")
+                        .font(Theme.Font.body)
+                    Text("A recipe with a \u{201C}schedule\u{201D} in its file runs by itself at those times. Claudette isn't a background service — schedules fire while the app is open, and a recipe can set \u{201C}catchUpIfMissed\u{201D} to run late instead of being skipped.")
+                        .font(Theme.Font.micro)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+
+            if scheduled.isEmpty {
+                Text("No recipe has a schedule yet.")
+                    .font(Theme.Font.micro)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+            } else {
+                ForEach(scheduled) { recipe in
+                    HStack(spacing: 8) {
+                        Image(systemName: recipe.symbolName)
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                            .frame(width: 14)
+                        Text(recipe.name)
+                            .font(Theme.Font.caption)
+                            .foregroundStyle(Theme.Palette.textPrimary)
+                        Text(recipe.schedule?.summary ?? "")
+                            .font(Theme.Font.micro)
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                        Spacer()
+                        if scheduler.activeRecipeId == recipe.id {
+                            Text("running now")
+                                .font(Theme.Font.micro)
+                                .foregroundStyle(Theme.Palette.accent)
+                        } else if scheduler.isEnabled, let next = scheduler.nextRun(for: recipe) {
+                            Text(Self.nextRunFormatter.string(from: next))
+                                .font(Theme.Font.micro)
+                                .foregroundStyle(Theme.Palette.textTertiary)
+                        }
+                    }
+                }
+            }
+
+            if !scheduler.history.isEmpty {
+                Divider().overlay(Theme.Palette.border)
+                Text("RECENT SCHEDULED RUNS")
+                    .font(.system(size: 10, weight: .semibold))
+                    .tracking(0.8)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                ForEach(scheduler.history.prefix(5)) { entry in
+                    HStack(spacing: 8) {
+                        Text(Self.nextRunFormatter.string(from: entry.firedAt))
+                            .font(Theme.Font.monoSmall)
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                        Text(entry.recipeName)
+                            .font(Theme.Font.caption)
+                            .foregroundStyle(Theme.Palette.textPrimary)
+                        Text(entry.outcome)
+                            .font(Theme.Font.micro)
+                            .foregroundStyle(Theme.Palette.textSecondary)
+                            .lineLimit(1)
+                        Spacer()
+                        if let url = entry.fileURL {
+                            Button("Open") { NSWorkspace.shared.open(url) }
+                                .font(Theme.Font.micro)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: Theme.Metric.cornerMd).fill(Theme.Palette.bgSecondary))
+    }
+
+    private static let nextRunFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE HH:mm"
+        return f
+    }()
+
+    /// Opens the shared profile in a visible browser and holds it there.
+    ///
+    /// A fresh profile is signed out, and a task run refuses to sign in and stops
+    /// at the first login wall — then closes the browser. Without this there's no
+    /// moment at which anyone can actually sign in to anything.
+    @ViewBuilder
+    private var signInRow: some View {
+        fieldRow(
+            label: "Sign in to a site",
+            help: "Opens a browser on the profile above and leaves it open. Sign in by hand, then close it here — the session persists, so task runs start signed in."
+        ) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    TextField("https://example.com", text: $signInURL)
+                        .textFieldStyle(.plain)
+                        .font(Theme.Font.monoSmall)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
+                        .disabled(browserRunner.signIn.isActive)
+
+                    switch browserRunner.signIn {
+                    case .closed, .failed:
+                        Button("Open browser") {
+                            browserRunner.startSignIn(url: signInURL, config: browser)
+                        }
+                        .font(Theme.Font.micro)
+                        .disabled(!browserRunner.environment.isReady || browserRunner.state.isBusy)
+                    case .opening:
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small).scaleEffect(0.7)
+                            Text("Opening…")
+                                .font(Theme.Font.micro)
+                                .foregroundStyle(Theme.Palette.textTertiary)
+                        }
+                    case .open:
+                        Button("Done — close it") { browserRunner.finishSignIn() }
+                            .font(Theme.Font.micro)
+                            .buttonStyle(.borderedProminent)
+                    }
+                }
+
+                switch browserRunner.signIn {
+                case .open:
+                    Text("Browser is open. Sign in, then come back and close it.")
+                        .font(Theme.Font.micro)
+                        .foregroundStyle(Theme.Palette.accent)
+                case .failed(let message):
+                    Text(message)
+                        .font(Theme.Font.micro)
+                        .foregroundStyle(DiffLine.removedRed)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .closed, .opening:
+                    if browserRunner.state.isBusy {
+                        Text("A task is running — stop it first.")
+                            .font(Theme.Font.micro)
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether browser-use is actually installed anywhere Claudette can reach,
+    /// with a one-click fix when it isn't.
+    @ViewBuilder
+    private var environmentRow: some View {
+        switch browserRunner.environment {
+        case .ready(let interpreter, let version):
+            HStack(spacing: 8) {
+                Circle().fill(DiffLine.addedGreen).frame(width: 6, height: 6)
+                Text("browser-use \(version) — \((interpreter as NSString).abbreviatingWithTildeInPath)")
+                    .font(Theme.Font.micro)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Button("Re-check") { browserRunner.refreshEnvironment(config: browser) }
+                    .font(Theme.Font.micro)
+            }
+        default:
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Circle().fill(Theme.Palette.textTertiary).frame(width: 6, height: 6)
+                    Text(browserRunner.environment.advice)
+                        .font(Theme.Font.caption)
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(spacing: 8) {
+                    Button(browserRunner.isInstalling ? "Installing…" : "Install browser-use") {
+                        browserRunner.installBrowserUse(config: browser)
+                    }
+                    .disabled(browserRunner.isInstalling)
+                    Button("Re-check") { browserRunner.refreshEnvironment(config: browser) }
+                        .disabled(browserRunner.isInstalling)
+                    if browserRunner.isInstalling {
+                        ProgressView().controlSize(.small).scaleEffect(0.7)
+                    }
+                }
+                if !browserRunner.installLog.isEmpty {
+                    ScrollView {
+                        Text(browserRunner.installLog)
+                            .font(Theme.Font.monoSmall)
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(height: 100)
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.codeBg))
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: Theme.Metric.cornerMd).fill(Theme.Palette.bgSecondary))
+        }
     }
 
     private var voiceSection: some View {

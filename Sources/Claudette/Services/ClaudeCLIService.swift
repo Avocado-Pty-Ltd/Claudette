@@ -227,7 +227,7 @@ final class ClaudeChatSession: ObservableObject {
     /// (built-ins + custom `.claude/commands/*.md` files like `/goal`) can
     /// resolve it. Keep in sync with `handleSlashCommand`'s switch below.
     private static let nativeSlashCommands: Set<String> = [
-        "/clear", "/new", "/help", "/resume", "/model", "/mode", "/reveal", "/session"
+        "/clear", "/new", "/help", "/resume", "/model", "/mode", "/reveal", "/session", "/browse", "/recipe"
     ]
 
     private static func isNativeSlashCommand(_ line: String) -> Bool {
@@ -269,6 +269,33 @@ final class ClaudeChatSession: ObservableObject {
                 setPermissionMode(m)
             } else {
                 appendSystem("Unknown mode: \(arg). Options: \(PermissionMode.allCases.map { $0.cliValue }.joined(separator: ", ")).")
+            }
+        case "/browse":
+            // Hands the goal to the browser-task panel rather than to Claude Code —
+            // the browser-use agent runs outside the CLI session entirely.
+            NotificationCenter.default.post(
+                name: .claudetteShowBrowserTask,
+                object: nil,
+                userInfo: arg.isEmpty ? [:] : ["goal": arg]
+            )
+            if arg.isEmpty {
+                appendSystem("Opening the browser task panel. Tip: /browse <goal> pre-fills it.")
+            } else {
+                appendSystem("Browser task: \(arg)")
+            }
+        case "/recipe":
+            // Claude writes the recipe file; the composer sheet shows it before
+            // anything is saved. Runs in its own throwaway CLI session, so it
+            // doesn't touch this conversation.
+            NotificationCenter.default.post(
+                name: .claudetteComposeRecipe,
+                object: nil,
+                userInfo: arg.isEmpty ? [:] : ["description": arg]
+            )
+            if arg.isEmpty {
+                appendSystem("Opening the recipe composer. Tip: /recipe <what it should do> starts it straight away.")
+            } else {
+                appendSystem("Writing a recipe for: \(arg)")
             }
         case "/reveal":
             NSWorkspace.shared.activateFileViewerSelecting([project.url])
@@ -395,6 +422,8 @@ final class ClaudeChatSession: ObservableObject {
     /resume [id]   — pick a previous session for this folder.
     /model <name>  — switch model (sonnet, opus, haiku) for the next chat.
     /reveal        — open the project folder in Finder.
+    /browse <goal> — send the browser agent to look something up.
+    /recipe <what it should do> — have Claude write a browser-task recipe.
     /session       — show the current session ID.
     /help          — show this list.
     """

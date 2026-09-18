@@ -6,6 +6,7 @@ struct ChatView: View {
     @EnvironmentObject var session: ClaudeChatSession
     @EnvironmentObject var store: ProjectStore
     @EnvironmentObject var voiceConfig: VoiceConfig
+    @EnvironmentObject var browserRunner: BrowserTaskRunner
     @StateObject private var speechInput = SpeechInput()
     @StateObject private var speechOutput: SpeechOutput
     @State private var draft: String = ""
@@ -147,6 +148,27 @@ struct ChatView: View {
         .onDisappear { stopConversation() }
     }
 
+    /// Opens the browser-task panel. Tinted while a run is in flight so the user
+    /// can close the sheet, keep chatting, and still see it working.
+    private var browserTaskButton: some View {
+        Button {
+            NotificationCenter.default.post(name: .claudetteShowBrowserTask, object: nil)
+        } label: {
+            Image(systemName: "globe")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(browserRunner.state.isBusy ? Theme.Palette.accent : Theme.Palette.textSecondary)
+                .frame(width: 30, height: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(browserRunner.state.isBusy
+                              ? Theme.Palette.accent.opacity(0.14)
+                              : Theme.Palette.bgSecondary)
+                )
+        }
+        .buttonStyle(.plain)
+        .help("Browser task (⇧⌘B) — send the agent to look something up")
+    }
+
     /// Conversation-mode button — a single toggle that owns the whole hands-free loop:
     /// mic listens → silence auto-sends → Claude works → TTS speaks summary → mic reopens.
     @ViewBuilder
@@ -283,6 +305,7 @@ struct ChatView: View {
                 session.setPermissionMode(newMode)
                 store.setPermissionMode(newMode, for: project)
             }
+            browserTaskButton
             conversationToggle
             ttsToggle
             Button {
