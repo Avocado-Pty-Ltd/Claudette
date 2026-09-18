@@ -18,6 +18,50 @@ struct TimelineItem: Identifiable, Equatable {
         case action(ActionEvent)
         case system(String)
         case pendingPermission(PendingPermission)
+        case pendingQuestion(PendingQuestion)
+    }
+}
+
+/// Claude Code's AskUserQuestion, surfaced via a `control_request` and
+/// answered on the same wire. Unlike `PendingPermission` this isn't a yes/no:
+/// the CLI wants `answers` keyed by question text inside `updatedInput`, so
+/// the card owns those answers and is the single source of truth for what
+/// has been chosen so far. Buttons on the card answer directly; a typed or
+/// spoken reply is the "Other" path and lands on the current question.
+struct PendingQuestion: Equatable, Identifiable {
+    let id: UUID
+    /// The CLI's `request_id` — echoed back on control_response.
+    let requestId: String
+    let questions: [InteractiveQuestion]
+    /// Answers collected so far, keyed by the question text (the key the
+    /// CLI expects). An answer is the option label(s) as the CLI spells
+    /// them — multi-select joined with ", " — or free text.
+    var answers: [String: String]
+    var status: Status
+
+    /// `cancelled` = the CLI withdrew the request or the process went away
+    /// before every question was answered; the card stays for context.
+    enum Status: String { case asking, answered, cancelled }
+
+    init(id: UUID = UUID(),
+         requestId: String,
+         questions: [InteractiveQuestion],
+         answers: [String: String] = [:],
+         status: Status = .asking) {
+        self.id = id
+        self.requestId = requestId
+        self.questions = questions
+        self.answers = answers
+        self.status = status
+    }
+
+    /// The first question without an answer — what a typed reply targets.
+    var currentQuestion: InteractiveQuestion? {
+        questions.first { answers[$0.question] == nil }
+    }
+
+    var isComplete: Bool {
+        !questions.isEmpty && questions.allSatisfy { answers[$0.question] != nil }
     }
 }
 
@@ -47,7 +91,9 @@ struct PendingPermission: Equatable, Identifiable {
     /// verbatim, so Claude can respond to it); nil on `.allowed`.
     var reason: String?
 
-    enum Status: String { case pending, allowed, denied }
+    /// `cancelled` = the CLI withdrew the prompt or the process went away
+    /// before the user answered; the card stays for context but is inert.
+    enum Status: String { case pending, allowed, denied, cancelled }
 
     init(id: UUID = UUID(),
          requestId: String,
