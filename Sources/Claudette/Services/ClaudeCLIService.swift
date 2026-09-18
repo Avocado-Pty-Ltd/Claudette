@@ -95,14 +95,21 @@ final class ClaudeChatSession: ObservableObject {
     /// the wrong pending request if two ever queued up. An array preserves
     /// arrival order — the user's reply is always applied to the oldest
     /// pending prompt, matching the on-screen top-to-bottom order of cards.
-    private var pendingPermissions: [String] = []
+    ///
+    /// Each entry keeps the tool's raw `input` because the CLI's allow schema
+    /// REQUIRES `updatedInput` (a record) — a bare `{"behavior":"allow"}` is
+    /// rejected with a ZodError and the tool call fails. We echo the input
+    /// back unchanged — except for AskUserQuestion, where `updatedInput` is
+    /// how the answers travel (see `answerQuestion`).
+    private var pendingPermissions: [PendingControlRequest] = []
 
-    /// Original tool input dict for each pending permission, keyed by
-    /// request_id. On `allow` we must echo this back as `updatedInput` in
-    /// the control_response — Claude Code CLI < 2.1.207 rejects an allow
-    /// that omits it and denies the tool with a validation error instead
-    /// of executing it.
-    private var pendingPermissionInputs: [String: [String: Any]] = [:]
+    private struct PendingControlRequest {
+        let requestId: String
+        let toolName: String
+        let input: [String: Any]
+
+        var isQuestion: Bool { toolName.lowercased() == "askuserquestion" }
+    }
 
     init(project: Project) {
         self.project = project
@@ -136,7 +143,14 @@ final class ClaudeChatSession: ObservableObject {
         // reply would sit in stdin ignored. Answer the OLDEST pending prompt
         // (FIFO), matching the visible top-to-bottom order of the cards.
         if let oldestPending = pendingPermissions.first {
-            answerPermission(requestId: oldestPending, userText: prompt, images: images)
+            if oldestPending.isQuestion {
+                answerQuestion(requestId: oldestPending.requestId, userText: prompt, images: images)
+            } else {
+                answerPermission(requestId: oldestPending.requestId,
+                                 input: oldestPending.input,
+                                 userText: prompt,
+                                 images: images)
+            }
             return
         }
 
@@ -409,7 +423,6 @@ final class ClaudeChatSession: ObservableObject {
         todos.removeAll()
         latestMonitor = nil
         pendingPermissions.removeAll()
-        pendingPermissionInputs.removeAll()
         interpretationTimeoutTask?.cancel()
         interpreter.cancel()
     }
@@ -433,14 +446,14 @@ final class ClaudeChatSession: ObservableObject {
             "--output-format", "stream-json",
             "--verbose",
             "--permission-mode", permissionMode.cliValue,
-            "--include-partial-messages",
-            // Route tool-permission asks over the stream-json wire as
-            // `control_request` events instead of silently returning an
-            // is_error tool_result. Without this flag the CLI treats any
-            // tool that needs approval as auto-denied — the model then sees
-            // "Claude requested permissions to use X, but you haven't
-            // granted it yet" and hallucinates a modal that doesn't exist.
-            "--permission-prompt-tool", "stdio"
+            // Without this the CLI never emits `can_use_tool` control_requests:
+            // any tool that needs approval just fails with an is_error
+            // tool_result ("This command requires approval") and Claude asks
+            // in prose — which we can't answer, so the turn loops. `stdio`
+            // routes the prompt over stdout/stdin as control_request /
+            // control_response, which handleControlRequest consumes.
+            "--permission-prompt-tool", "stdio",
+            "--include-partial-messages"
         ]
         // Prefer the live sessionId (set by the CLI's `system.init` on the previous run)
         // so multi-turn conversations continue the same Claude Code session. The persisted
@@ -512,6 +525,7 @@ final class ClaudeChatSession: ObservableObject {
     private func handleTermination(status: Int32) {
         isRunning = false
         activeAction = nil
+        expirePendingPermissions()
         // Ignore normal exits: 0 = clean, 15 = SIGTERM (we killed it),
         // 143 = 128+SIGTERM which is how `claude --print` reports its own end-of-turn exit.
         if status != 0 && status != 15 && status != 143 {
@@ -527,6 +541,7 @@ final class ClaudeChatSession: ObservableObject {
     }
 
     private func cleanup() {
+        expirePendingPermissions()
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         process = nil
@@ -607,6 +622,8 @@ final class ClaudeChatSession: ObservableObject {
             handleResultEvent(obj)
         case "control_request":
             handleControlRequest(obj)
+        case "control_cancel_request":
+            handleControlCancelRequest(obj)
         default:
             NSLog("Claudette: unknown event type '\(type)'")
         }
@@ -614,12 +631,15 @@ final class ClaudeChatSession: ObservableObject {
 
     // MARK: - Permission-prompt wire (control_request / control_response)
     //
-    // Claude Code emits `control_request` whenever the model wants to use a
-    // tool that isn't blanket-allowed by the current --permission-mode (Bash
-    // and WebFetch are the common ones). The CLI blocks reading stdin for the
-    // matching `control_response` before making the tool call, so we MUST
-    // respond eventually or the turn deadlocks and Claude "loses the plot"
-    // — hallucinating tool results or drifting off-topic.
+    // With `--permission-prompt-tool stdio` (set in startProcess), Claude Code
+    // emits `control_request` whenever the model wants to use a tool that
+    // isn't blanket-allowed by the current --permission-mode (Bash and
+    // WebFetch are the common ones). Without that flag the CLI never asks —
+    // the tool just fails with "This command requires approval" and the
+    // model pleads for permission in prose we have no way to grant. The CLI
+    // blocks the tool call until the matching `control_response` arrives, so
+    // we MUST respond (or see the request cancelled / the process die and
+    // expire it) or the turn deadlocks and Claude "loses the plot".
     //
     // We turn each request into a conversational card in the timeline and
     // route the user's next utterance through `answerPermission`, rather
@@ -646,6 +666,33 @@ final class ClaudeChatSession: ObservableObject {
         let toolName = (request["tool_name"] as? String) ?? "the tool"
         let input = (request["input"] as? [String: Any]) ?? [:]
 
+        let entry = PendingControlRequest(requestId: requestId, toolName: toolName, input: input)
+        if entry.isQuestion {
+            // AskUserQuestion isn't a yes/no permission — the CLI routes it
+            // through can_use_tool so the host can collect answers, and it
+            // expects them back inside `updatedInput.answers`. The card that
+            // collects them REPLACES the tool_use action card for the same
+            // tool_use_id (which would otherwise sit there spinning while
+            // we're actually waiting on the user), so there's one card and
+            // it knows when it's been answered.
+            let card = PendingQuestion(requestId: requestId, questions: Self.parseQuestions(input))
+            if let toolUseId = request["tool_use_id"] as? String,
+               let idx = actionIndexByToolId[toolUseId],
+               timeline.indices.contains(idx),
+               case .action = timeline[idx].kind {
+                timeline[idx].kind = .pendingQuestion(card)
+            } else {
+                timeline.append(TimelineItem(kind: .pendingQuestion(card)))
+            }
+            pendingPermissions.append(entry)
+            let spoken = Self.composeQuestionNarration(card.currentQuestion)
+            liveNarration = spoken
+            isRunning = false
+            activeAction = nil
+            appendToPrettyLog("? \(spoken)\n")
+            return
+        }
+
         let summary = Self.summarize(toolName: toolName, input: input)
         let inputJSON = Self.prettyPrintJSON(input)
         let prompt = Self.composePermissionPrompt(toolName: toolName, summary: summary)
@@ -658,8 +705,7 @@ final class ClaudeChatSession: ObservableObject {
             prompt: prompt
         )
         timeline.append(TimelineItem(kind: .pendingPermission(pending)))
-        pendingPermissions.append(requestId)
-        pendingPermissionInputs[requestId] = input
+        pendingPermissions.append(entry)
 
         // Surface the ask into the voice channel too so orb mode isn't silent
         // while the user stares at a paused sphere.
@@ -670,6 +716,143 @@ final class ClaudeChatSession: ObservableObject {
         isRunning = false
         activeAction = nil
         appendToPrettyLog("? \(prompt)\n")
+    }
+
+    // MARK: - AskUserQuestion
+
+    /// A button on the question card was tapped (or a multi-select submitted).
+    /// Records the answer and, once every question has one, sends them all
+    /// back in a single allow so Claude resumes.
+    func answerQuestion(requestId: String, questionText: String, answer: String) {
+        recordAnswer(requestId: requestId, questionText: questionText, answer: answer)
+    }
+
+    /// The user typed / spoke while a question was pending — the "Other"
+    /// path. Matching mirrors the CLI's own typed-answer logic: a reply equal
+    /// to an option label (case-insensitive) selects that option; anything
+    /// else is taken verbatim as free text. For multi-select a
+    /// comma-separated reply is split, each part label-matched, and
+    /// re-joined with ", " — the same join the interactive picker uses.
+    /// The reply is tried against every unanswered question's options first
+    /// (so naming an option from question 2 before question 1 still lands on
+    /// the right one); a non-matching reply goes to the current question.
+    private func answerQuestion(requestId: String, userText: String, images: [UserImage]) {
+        timeline.append(TimelineItem(kind: .userText(userText, images: images)))
+        guard let card = pendingQuestionCard(requestId: requestId) else {
+            // Card vanished (shouldn't happen) — don't leave the CLI hanging.
+            pendingPermissions.removeAll { $0.requestId == requestId }
+            return
+        }
+        let trimmed = userText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let unanswered = card.questions.filter { card.answers[$0.question] == nil }
+        var target: InteractiveQuestion? = nil
+        var matched: String? = nil
+        for q in unanswered {
+            if let m = Self.matchAnswer(trimmed, to: q) { target = q; matched = m; break }
+        }
+        guard let question = target ?? unanswered.first else {
+            pendingPermissions.removeAll { $0.requestId == requestId }
+            return
+        }
+        let answer = matched ?? (trimmed.isEmpty ? "(no answer)" : trimmed)
+        recordAnswer(requestId: requestId, questionText: question.question, answer: answer)
+    }
+
+    /// Single write path for answers, whichever way they arrived. Updates the
+    /// card in place, then either prompts for the next question or ships the
+    /// complete set as `updatedInput.answers`.
+    private func recordAnswer(requestId: String, questionText: String, answer: String) {
+        guard let entry = pendingPermissions.first(where: { $0.requestId == requestId }),
+              entry.isQuestion else { return }
+        var complete = false
+        var next: InteractiveQuestion? = nil
+        var answers: [String: String] = [:]
+        updatePendingQuestion(requestId: requestId) { card in
+            guard card.status == .asking else { return }
+            card.answers[questionText] = answer
+            complete = card.isComplete
+            next = card.currentQuestion
+            answers = card.answers
+            if complete { card.status = .answered }
+        }
+        appendToPrettyLog("  ⎿ \(answer)\n")
+        guard complete else {
+            let spoken = Self.composeQuestionNarration(next)
+            liveNarration = spoken
+            appendToPrettyLog("? \(spoken)\n")
+            return
+        }
+        var updatedInput = entry.input
+        updatedInput["answers"] = answers
+        sendControlResponse(requestId: requestId, behavior: .allow, updatedInput: updatedInput)
+        pendingPermissions.removeAll { $0.requestId == requestId }
+        isRunning = true
+    }
+
+    private func pendingQuestionCard(requestId: String) -> PendingQuestion? {
+        for item in timeline.reversed() {
+            if case let .pendingQuestion(card) = item.kind, card.requestId == requestId { return card }
+        }
+        return nil
+    }
+
+    private func updatePendingQuestion(requestId: String,
+                                       _ mutate: (inout PendingQuestion) -> Void) {
+        for i in timeline.indices.reversed() {
+            if case var .pendingQuestion(card) = timeline[i].kind, card.requestId == requestId {
+                mutate(&card)
+                timeline[i].kind = .pendingQuestion(card)
+                return
+            }
+        }
+    }
+
+    /// Label-match a reply against one question's options. Returns the
+    /// canonical answer string (the option label(s) as the CLI spells them)
+    /// or nil if the reply doesn't name any option.
+    private static func matchAnswer(_ reply: String, to question: InteractiveQuestion) -> String? {
+        let options = question.options.map(\.label)
+        guard !options.isEmpty else { return nil }
+        func label(for text: String) -> String? {
+            let needle = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return options.first { $0.lowercased() == needle }
+        }
+        if let single = label(for: reply) { return single }
+        guard question.multiSelect else { return nil }
+        let parts = reply.split(separator: ",").map(String.init)
+        guard parts.count > 1 else { return nil }
+        let labels = parts.compactMap(label(for:))
+        // Only treat it as a multi-pick if every part named an option;
+        // otherwise it's free text and goes through verbatim.
+        return labels.count == parts.count ? labels.joined(separator: ", ") : nil
+    }
+
+    /// Speakable form of a question: the text plus its options, so orb mode
+    /// hears what it's being asked instead of silence.
+    private static func composeQuestionNarration(_ question: InteractiveQuestion?) -> String {
+        guard let question else { return "Claude has a question for you." }
+        let labels = question.options.map(\.label)
+        if labels.isEmpty { return question.question }
+        return "\(question.question) Options: \(labels.joined(separator: ", ")). Or say something else."
+    }
+
+    /// Decode the `questions` array of an AskUserQuestion input. Shared by
+    /// the tool_use action card and the control_request question card.
+    static func parseQuestions(_ input: [String: Any]) -> [InteractiveQuestion] {
+        guard let questions = input["questions"] as? [[String: Any]] else { return [] }
+        return questions.compactMap { q in
+            guard let text = q["question"] as? String else { return nil }
+            let options = (q["options"] as? [[String: Any]] ?? []).compactMap { o -> InteractiveOption? in
+                guard let label = o["label"] as? String else { return nil }
+                return InteractiveOption(label: label, description: o["description"] as? String)
+            }
+            return InteractiveQuestion(
+                question: text,
+                header: q["header"] as? String,
+                multiSelect: (q["multiSelect"] as? Bool) ?? false,
+                options: options
+            )
+        }
     }
 
     /// The user has typed / spoken a response while a permission was pending.
@@ -683,7 +866,10 @@ final class ClaudeChatSession: ObservableObject {
     /// If the user sends images with no text, we treat it as a deny with a
     /// generic message: image-only replies to a yes/no prompt are almost
     /// never an affirmation of a destructive command.
-    private func answerPermission(requestId: String, userText: String, images: [UserImage] = []) {
+    private func answerPermission(requestId: String,
+                                  input: [String: Any],
+                                  userText: String,
+                                  images: [UserImage] = []) {
         // Show the user's answer in the timeline like a normal message, so the
         // pending card + response read as a natural conversation exchange.
         timeline.append(TimelineItem(kind: .userText(userText, images: images)))
@@ -694,13 +880,7 @@ final class ClaudeChatSession: ObservableObject {
             : Self.classifyPermissionIntent(trimmed)
         switch intent {
         case .allow:
-            // Echo the original tool input back as updatedInput. Required by
-            // Claude Code CLI < 2.1.207, harmless on newer versions. Falls
-            // back to an empty dict if we somehow lost the input (shouldn't
-            // happen, but the CLI would reject a missing field either way so
-            // an empty stub gives a clearer server-side error than a crash).
-            let originalInput = pendingPermissionInputs[requestId] ?? [:]
-            sendControlResponse(requestId: requestId, behavior: .allow, updatedInput: originalInput)
+            sendControlResponse(requestId: requestId, behavior: .allow, updatedInput: input)
             updatePendingPermission(requestId: requestId) { p in
                 p.status = .allowed
             }
@@ -720,8 +900,7 @@ final class ClaudeChatSession: ObservableObject {
             }
             appendToPrettyLog("  ⎿ denied: \(denyMessage)\n")
         }
-        pendingPermissions.removeAll { $0 == requestId }
-        pendingPermissionInputs.removeValue(forKey: requestId)
+        pendingPermissions.removeAll { $0.requestId == requestId }
         // Claude will resume work on either verdict — allow triggers the tool
         // call, deny surfaces the user's message as the tool result and the
         // model composes a fresh reply.
@@ -732,19 +911,22 @@ final class ClaudeChatSession: ObservableObject {
     /// verdict. See the Claude Agent SDK docs for the control_response shape;
     /// the CLI matches on `request_id` inside `response`.
     ///
-    /// On `allow`, `updatedInput` is required by CLI < 2.1.207 — pass the
-    /// original tool input (unmodified). On `deny`, pass the user's message
-    /// so the model sees their guidance and can re-plan.
+    /// The CLI validates the inner response with a strict union:
+    ///   { behavior: "allow", updatedInput: <record> }   — updatedInput REQUIRED
+    ///   { behavior: "deny",  message: <string> }        — message REQUIRED
+    /// Anything else is rejected with a ZodError and the tool call fails as
+    /// "Tool permission request failed", so both branches always fill their
+    /// required field.
     private func sendControlResponse(requestId: String,
                                      behavior: PermissionBehavior,
                                      updatedInput: [String: Any]? = nil,
                                      message: String? = nil) {
         var innerResponse: [String: Any] = ["behavior": behavior.rawValue]
-        if behavior == .allow {
+        switch behavior {
+        case .allow:
             innerResponse["updatedInput"] = updatedInput ?? [:]
-        }
-        if let message, behavior == .deny {
-            innerResponse["message"] = message
+        case .deny:
+            innerResponse["message"] = message ?? "Denied by user."
         }
         sendJSONLine([
             "type": "control_response",
@@ -767,6 +949,41 @@ final class ClaudeChatSession: ObservableObject {
                 mutate(&p)
                 timeline[i].kind = .pendingPermission(p)
                 return
+            }
+        }
+    }
+
+    /// The CLI withdrew a prompt (turn aborted, process shutting down, or the
+    /// tool call was superseded). Drop it from the queue so the user's next
+    /// message isn't swallowed as an answer to a request nobody is waiting on.
+    private func handleControlCancelRequest(_ obj: [String: Any]) {
+        guard let requestId = obj["request_id"] as? String else { return }
+        guard pendingPermissions.contains(where: { $0.requestId == requestId }) else { return }
+        pendingPermissions.removeAll { $0.requestId == requestId }
+        updatePendingPermission(requestId: requestId) { p in
+            p.status = .cancelled
+        }
+        updatePendingQuestion(requestId: requestId) { q in
+            if q.status == .asking { q.status = .cancelled }
+        }
+        appendToPrettyLog("  ⎿ prompt withdrawn\n")
+    }
+
+    /// Mark every open prompt as cancelled and empty the queue. Called whenever
+    /// the CLI process goes away (exit, crash, user stop, /clear): the request
+    /// ids die with the process, and if we kept routing user input through
+    /// `answerPermission` it would write to a nil stdin and vanish — leaving
+    /// the UI stuck "Working…" with nothing actually running.
+    private func expirePendingPermissions() {
+        guard !pendingPermissions.isEmpty else { return }
+        let stale = pendingPermissions.map(\.requestId)
+        pendingPermissions.removeAll()
+        for requestId in stale {
+            updatePendingPermission(requestId: requestId) { p in
+                p.status = .cancelled
+            }
+            updatePendingQuestion(requestId: requestId) { q in
+                if q.status == .asking { q.status = .cancelled }
             }
         }
     }
@@ -959,7 +1176,25 @@ final class ClaudeChatSession: ObservableObject {
     }
 
     private func completeAction(toolId: String, result: String, isError: Bool) {
-        guard let idx = actionIndexByToolId[toolId] else { return }
+        guard let idx = actionIndexByToolId[toolId], timeline.indices.contains(idx) else { return }
+        if case let .pendingQuestion(card) = timeline[idx].kind {
+            // An AskUserQuestion whose action card was swapped for the question
+            // card (see handleControlRequest). A success result just restates
+            // the answers already on the card; an error (CLI rejected our
+            // response, user declined, prompt aborted) is the only thing the
+            // card can't already show, so surface it and stop asking.
+            actionIndexByToolId.removeValue(forKey: toolId)
+            if isError {
+                appendSystem("Question failed: \(result)")
+                appendToPrettyLog("  ⎿ error: \(result)\n")
+            }
+            updatePendingQuestion(requestId: card.requestId) { q in
+                if q.status == .asking { q.status = isError ? .cancelled : .answered }
+            }
+            pendingPermissions.removeAll { $0.requestId == card.requestId }
+            if activeAction?.id == toolId { activeAction = nil }
+            return
+        }
         guard case var .action(event) = timeline[idx].kind else { return }
         event.result = result
         event.isError = isError
@@ -1119,6 +1354,14 @@ final class ClaudeChatSession: ObservableObject {
         }
         if let subtype = obj["subtype"] as? String, subtype == "error_max_turns" {
             appendSystem("Reached maximum turns. Send another message to continue.")
+        }
+        // A failed turn (auth expired, API error, budget hit) carries its
+        // explanation only in `result` — there's no assistant message to
+        // render — so surface it, otherwise the orb just goes idle in silence.
+        if (obj["is_error"] as? Bool) == true,
+           let text = obj["result"] as? String,
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            appendSystem(text)
         }
         // Emit the narrator summary once per turn.
         let summary = composeTurnSummary(fromIndex: turnStartIndex)
@@ -1634,20 +1877,8 @@ final class ClaudeChatSession: ObservableObject {
                 return TodoEntry(content: content, status: status, priority: t["priority"] as? String)
             }
         }
-        if let questions = input["questions"] as? [[String: Any]] {
-            event.questions = questions.compactMap { q in
-                guard let text = q["question"] as? String else { return nil }
-                let options = (q["options"] as? [[String: Any]] ?? []).compactMap { o -> InteractiveOption? in
-                    guard let label = o["label"] as? String else { return nil }
-                    return InteractiveOption(label: label, description: o["description"] as? String)
-                }
-                return InteractiveQuestion(
-                    question: text,
-                    header: q["header"] as? String,
-                    multiSelect: (q["multiSelect"] as? Bool) ?? false,
-                    options: options
-                )
-            }
+        if input["questions"] != nil {
+            event.questions = Self.parseQuestions(input)
         }
     }
 
