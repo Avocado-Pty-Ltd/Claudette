@@ -618,21 +618,43 @@ final class BrowserTaskRunner: ObservableObject {
 
     // MARK: - Discovery (off-main)
 
+    /// Locate `browser_agent/runner.py`.
+    ///
+    /// Deliberately does NOT go through `Bundle.module`. SwiftPM's generated
+    /// accessor only looks in two places — `Bundle.main.bundleURL/<name>.bundle`
+    /// (which for an .app is *beside* `Contents/`, not inside it) and the
+    /// absolute `.build/…` path baked in at compile time — and it `fatalError`s
+    /// when neither exists. `build.sh` puts the resource bundle where macOS
+    /// expects it, `Contents/Resources/`, so every installed copy of the app
+    /// crashed the moment a task was run. Check the real candidates ourselves
+    /// and return nil rather than trap.
     nonisolated static func sidecarURL() -> URL? {
-        if let bundled = Bundle.module.url(
-            forResource: "runner",
-            withExtension: "py",
-            subdirectory: "browser_agent"
-        ) {
-            return bundled
+        let fm = FileManager.default
+        let relative = "browser_agent/runner.py"
+        let bundleName = "Claudette_Claudette.bundle"
+
+        var candidates: [URL] = []
+        let main = Bundle.main
+        // A built .app: build.sh copies the SwiftPM bundle into Contents/Resources.
+        if let res = main.resourceURL {
+            candidates.append(res.appendingPathComponent(bundleName).appendingPathComponent(relative))
+            candidates.append(res.appendingPathComponent(relative))
         }
-        // Running from `swift run` against the source tree rather than a built
-        // .app — resolve next to this file so development needs no bundle.
-        let here = URL(fileURLWithPath: #filePath)
+        // Where SwiftPM's own accessor would look (bundle next to the executable
+        // or next to the .app) — covers `swift run` and ad-hoc layouts.
+        candidates.append(main.bundleURL.appendingPathComponent(bundleName).appendingPathComponent(relative))
+        if let exe = main.executableURL {
+            candidates.append(exe.deletingLastPathComponent()
+                .appendingPathComponent(bundleName).appendingPathComponent(relative))
+        }
+        // Running from the source tree — resolve next to this file so
+        // development needs no bundle at all.
+        candidates.append(URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // Services/
             .deletingLastPathComponent()   // Claudette/
-            .appendingPathComponent("Resources/browser_agent/runner.py")
-        return FileManager.default.isReadableFile(atPath: here.path) ? here : nil
+            .appendingPathComponent("Resources/\(relative)"))
+
+        return candidates.first { fm.isReadableFile(atPath: $0.path) }
     }
 
     /// Interpreters worth trying, most-preferred first.
