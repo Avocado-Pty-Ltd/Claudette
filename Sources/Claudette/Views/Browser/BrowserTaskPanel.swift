@@ -32,6 +32,9 @@ struct BrowserTaskPanel: View {
 
     /// Description handed over by `/recipe`, consumed once on appear.
     var pendingRecipeDescription: String = ""
+    /// False when no project is selected — `ChatView` isn't mounted, so nothing
+    /// would receive a `.claudetteFillDraft` post.
+    var canSendToChat: Bool = true
 
     private var recipe: BrowserRecipe? { recipes.recipe(id: recipeId) }
 
@@ -124,6 +127,9 @@ struct BrowserTaskPanel: View {
             let drafts = working.draftCount
             var text = "\(results) result\(results == 1 ? "" : "s")"
             if drafts > 0 { text += " · \(drafts) draft\(drafts == 1 ? "" : "s")" }
+            if runner.blockedActions > 0 {
+                text += " · \(runner.blockedActions) action\(runner.blockedActions == 1 ? "" : "s") refused"
+            }
             return text
         }
         return "Browses in your browser and reports back. You decide what to do."
@@ -502,17 +508,19 @@ struct BrowserTaskPanel: View {
                     runner.clear()
                 }
                 Button("Copy all") { copyAll() }
-                Button {
-                    NotificationCenter.default.post(
-                        name: .claudetteFillDraft,
-                        object: nil,
-                        userInfo: ["text": working.markdown()]
-                    )
-                    dismiss()
-                } label: {
-                    Label("Send to chat", systemImage: "arrow.turn.down.left")
+                if canSendToChat {
+                    Button {
+                        NotificationCenter.default.post(
+                            name: .claudetteFillDraft,
+                            object: nil,
+                            userInfo: ["text": working.markdown()]
+                        )
+                        dismiss()
+                    } label: {
+                        Label("Send to chat", systemImage: "arrow.turn.down.left")
+                    }
+                    .help("Drop the results into the chat box so Claude can work with them.")
                 }
-                .help("Drop the results into the chat box so Claude can work with them.")
             }
             Spacer()
             if runner.state.isBusy {

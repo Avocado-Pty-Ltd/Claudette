@@ -165,6 +165,9 @@ you turn on the master switch in Settings. Each scheduled run writes its results
 
 Runs are **read-only by default**: the agent can search, filter and read, but can't
 submit a form, post, send, or buy — which is what makes it safe to leave on a schedule.
+That's enforced at the action level, not just in the prompt: every click and keystroke
+passes a guard that refuses outbound controls and fails closed on anything it can't
+identify.
 Turn that off per-run for a task that genuinely needs to click through something. Check
 the terms of any site you point it at; that call is yours, which is exactly why the
 rules live in your file and not in Claudette.

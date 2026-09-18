@@ -135,6 +135,8 @@ final class BrowserTaskRunner: ObservableObject {
     /// Draft labels and their character caps, carried from the recipe that
     /// started the run so the cards can count against them.
     @Published private(set) var draftLimits: [String: Int] = [:]
+    /// How many actions the read-only guard refused this run.
+    @Published private(set) var blockedActions: Int = 0
 
     private var process: Process?
     private var stdoutBuffer = Data()
@@ -175,6 +177,7 @@ final class BrowserTaskRunner: ObservableObject {
         report = nil
         lastError = nil
         log = ""
+        blockedActions = 0
         stdoutBuffer = Data()
         userCancelled = false
         state = .running
@@ -376,6 +379,14 @@ final class BrowserTaskRunner: ObservableObject {
                 statusLine = "Finished after \(count) steps."
             }
 
+        case "blocked":
+            // The read-only guard refused an action. Worth showing: it's the
+            // difference between "we told it not to" and "it tried and couldn't".
+            let reason = obj["reason"] as? String ?? "an action"
+            blockedActions += 1
+            statusLine = "Refused \(reason)"
+            appendLog("blocked: \(reason)\n")
+
         case "error":
             lastError = obj["message"] as? String ?? "The agent reported an error."
             if (obj["kind"] as? String) == "missing_dependency" {
@@ -523,12 +534,15 @@ final class BrowserTaskRunner: ObservableObject {
                 for path in candidateInterpreters(preferred: preferred)
                 where FileManager.default.isExecutableFile(atPath: path) {
                     let result = probe(interpreter: path)
-                    guard result.exists else { continue }
+                    guard result.exists, result.versionIsSupported else { continue }
+                    // Version first: a 3.9 with stale browser-use metadata would
+                    // otherwise be picked and then fail at launch, instead of
+                    // falling through to a candidate that can actually run it.
                     if result.hasBrowserUse {
                         continuation.resume(returning: .ready(interpreter: path, version: result.browserUseVersion))
                         return
                     }
-                    if result.versionIsSupported && usablePython == nil { usablePython = path }
+                    if usablePython == nil { usablePython = path }
                 }
                 if let usablePython {
                     continuation.resume(returning: .missingPackage(interpreter: usablePython))

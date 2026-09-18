@@ -213,7 +213,7 @@ final class TaskScheduler: ObservableObject {
     // MARK: - Output
 
     /// `~/Library/Application Support/Claudette/browser-runs`
-    static var transcriptDirectory: URL {
+    nonisolated static var transcriptDirectory: URL {
         BrowserAgentConfig.supportDir.appendingPathComponent("browser-runs", isDirectory: true)
     }
 

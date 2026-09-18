@@ -15,7 +15,7 @@ final class RecipeStore: ObservableObject {
     @Published private(set) var loadErrors: [String] = []
 
     /// `~/Library/Application Support/Claudette/browser-recipes`
-    static var directory: URL {
+    nonisolated static var directory: URL {
         BrowserAgentConfig.supportDir.appendingPathComponent("browser-recipes", isDirectory: true)
     }
 

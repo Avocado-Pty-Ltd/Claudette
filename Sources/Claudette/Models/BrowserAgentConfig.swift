@@ -123,22 +123,27 @@ final class BrowserAgentConfig: ObservableObject {
         didSet { UserDefaults.standard.set(lastRecipeId, forKey: Self.lastRecipeKey) }
     }
 
+    // These three are pure path arithmetic over FileManager, and the interpreter
+    // discovery in BrowserUseService reads them from `nonisolated` code running
+    // off the main actor. Without `nonisolated` they inherit this class's
+    // @MainActor isolation and the package doesn't build under Swift 6.
+
     /// Application Support/Claudette, where the browser profile, the managed
     /// virtualenv and the user's recipes live.
-    static var supportDir: URL {
+    nonisolated static var supportDir: URL {
         let base = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first ?? URL(fileURLWithPath: NSHomeDirectory())
         return base.appendingPathComponent("Claudette", isDirectory: true)
     }
 
-    static var defaultProfileDir: String {
+    nonisolated static var defaultProfileDir: String {
         supportDir.appendingPathComponent("browser-profile", isDirectory: true).path
     }
 
     /// Where the managed virtualenv lives when the user installs browser-use from
     /// Settings. Inside Application Support so uninstalling Claudette takes it too.
-    static var managedVenvDir: URL {
+    nonisolated static var managedVenvDir: URL {
         supportDir.appendingPathComponent("browser-use-venv", isDirectory: true)
     }
 

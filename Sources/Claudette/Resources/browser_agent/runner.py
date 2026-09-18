@@ -34,6 +34,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -51,6 +52,39 @@ EXCLUDED_ACTIONS = ["evaluate", "upload_file"]
 
 # Additionally excluded when the task runs read-only.
 INTERACTION_ACTIONS = ["send_keys"]
+
+# Controls a read-only run refuses to click, matched against an element's visible
+# label. `click` and `input` can't simply be removed — they're how you search and
+# paginate — so the refusal happens per-action in GuardedTools below.
+#
+# Deliberately NOT here: accept, agree, allow, confirm, continue, ok. Those are
+# cookie and consent banners, and blocking them would end most runs on the first
+# page. Also not here: bare "apply" and "save", which are far more often "Apply
+# filters" and "Save search" than anything outbound.
+OUTBOUND_LABEL = re.compile(
+    r"\b("
+    r"send|post|publish|connect|follow|unfollow|subscribe|endorse|invite|"
+    r"comment|reply|share|submit|delete|remove|withdraw|donate|"
+    r"buy|purchase|pay|checkout|check\s+out|place\s+order|order\s+now|"
+    r"apply\s+now|easy\s+apply|submit\s+application|"
+    r"sign\s+up|signup|register|join\s+now"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Fields a read-only run refuses to type into — composers, not search boxes.
+COMPOSER_FIELD = re.compile(
+    r"(add\s+a\s+comment|write\s+a\s+comment|leave\s+a\s+comment|your\s+comment|"
+    r"write\s+something|share\s+an\s+update|start\s+a\s+post|say\s+something|"
+    r"write\s+a\s+message|your\s+message|send\s+a\s+message|"
+    r"write\s+a\s+review|your\s+review|reply|compose)",
+    re.IGNORECASE,
+)
+
+# Attributes worth reading to work out what a control says, best first.
+LABEL_ATTRIBUTES = (
+    "aria-label", "title", "value", "placeholder", "alt", "name", "data-testid", "id"
+)
 
 
 def emit(event: dict[str, Any]) -> None:
@@ -159,6 +193,99 @@ class TaskSpec(BaseModel):
     drafts: list[DraftSlot] = Field(default_factory=list)
 
 
+def element_label(node: Any) -> str:
+    """Best-effort visible label for a DOM node: what a person would call it."""
+    parts: list[str] = []
+    attributes = getattr(node, "attributes", None) or {}
+    for key in LABEL_ATTRIBUTES:
+        value = attributes.get(key)
+        if value and isinstance(value, str):
+            parts.append(value)
+    value = getattr(node, "node_value", None)
+    if value and isinstance(value, str):
+        parts.append(value)
+    try:
+        text = node.get_all_children_text(max_depth=2)
+        if text:
+            parts.append(text)
+    except Exception:
+        pass
+    joined = " ".join(p.strip() for p in parts if p and p.strip())
+    return " ".join(joined.split())[:300]
+
+
+def make_guarded_tools(base_cls: type, result_cls: type, read_only: bool):
+    """Build a Tools subclass that refuses outbound actions on a read-only run.
+
+    `Tools.act` is the single funnel every action passes through, which makes it
+    the one honest place to enforce read-only. Without this, "never clicks Send"
+    is a promise made only in the prompt — and a page the agent reads can try to
+    talk it into ignoring the prompt.
+
+    This is defence in depth, not a sandbox: it classifies a control by the text
+    it shows, so an unlabelled or deceptively labelled button can still get
+    through. It fails closed on anything it can't identify, and a refusal is not
+    fatal — the agent is told why and picks another route.
+
+    `base_cls` and `result_cls` are passed in rather than imported at module level
+    because browser-use is imported lazily inside `run` — a missing install has to
+    report itself as one clean event, not an ImportError traceback at startup.
+    """
+
+    class GuardedTools(base_cls):  # type: ignore[valid-type, misc]
+        async def act(self, action, browser_session, **kwargs):
+            if read_only:
+                reason = await self._veto(action, browser_session)
+                if reason:
+                    emit({"type": "blocked", "reason": reason})
+                    return result_cls(
+                        error=(
+                            f"Refused: {reason}. This run is read-only — it gathers "
+                            "information and drafts text, and the person running it "
+                            "acts on the result themselves. Find another way to get "
+                            "what you need, or call `done` and explain what stopped you."
+                        ),
+                        long_term_memory=f"Read-only run refused an action: {reason}",
+                    )
+            return await super().act(action=action, browser_session=browser_session, **kwargs)
+
+        async def _veto(self, action, browser_session) -> str | None:
+            try:
+                requested = action.model_dump(exclude_unset=True)
+            except Exception:
+                return "couldn't read the requested action"
+
+            for name, params in requested.items():
+                if params is None or name not in ("click", "input"):
+                    continue
+                if not isinstance(params, dict):
+                    return f"couldn't read the parameters for `{name}`"
+
+                index = params.get("index")
+                if index is None:
+                    # Coordinate clicks and the like give us nothing to classify.
+                    return f"`{name}` didn't identify an element to check"
+                try:
+                    node = await browser_session.get_element_by_index(int(index))
+                except Exception:
+                    node = None
+                if node is None:
+                    return f"couldn't find the element `{name}` wanted to act on"
+
+                label = element_label(node)
+                if not label:
+                    return f"the element `{name}` wanted to act on has no readable label"
+
+                shown = label[:80]
+                if name == "click" and OUTBOUND_LABEL.search(label):
+                    return f'"{shown}" looks like a control that sends or publishes something'
+                if name == "input" and COMPOSER_FIELD.search(label):
+                    return f'"{shown}" looks like a message or comment box'
+            return None
+
+    return GuardedTools
+
+
 READ_ONLY_RULES = """
 This run is READ-ONLY. You are gathering information and writing drafts; you are not
 acting on the user's behalf.
@@ -174,6 +301,10 @@ acting on the user's behalf.
   they're how you read a site.
 
 The user reviews everything you draft and sends it themselves.
+
+These limits are enforced by the app, not just asked of you: an action that looks
+like it sends or publishes will be refused before it runs, and you'll be told why.
+If that happens, find another route or call `done` and explain what stopped you.
 """.strip()
 
 INTERACTIVE_RULES = """
@@ -325,7 +456,7 @@ def read_spec() -> TaskSpec:
 
 async def run(args: argparse.Namespace, spec: TaskSpec) -> int:
     try:
-        from browser_use import Agent, BrowserProfile, BrowserSession, Tools
+        from browser_use import ActionResult, Agent, BrowserProfile, BrowserSession, Tools
     except ImportError as exc:
         fail(
             f"browser-use is not installed in this Python environment ({sys.executable}): {exc}. "
@@ -373,7 +504,7 @@ async def run(args: argparse.Namespace, spec: TaskSpec) -> int:
     excluded = list(EXCLUDED_ACTIONS)
     if spec.read_only:
         excluded += INTERACTION_ACTIONS
-    tools = Tools(exclude_actions=excluded)
+    tools = make_guarded_tools(Tools, ActionResult, spec.read_only)(exclude_actions=excluded)
 
     step_count = 0
 

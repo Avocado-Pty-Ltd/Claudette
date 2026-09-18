@@ -100,9 +100,27 @@ one-off variation doesn't mean editing the file.
 ## Read-only by default
 
 A read-only run can search, filter, sort, paginate and read. It **cannot** submit a
-form, post, send a message, apply, connect, follow, subscribe, buy, or delete. The
-agent is told so explicitly, and `evaluate` (arbitrary JavaScript), `upload_file` and
-`send_keys` are removed from its toolbelt entirely.
+form, post, send a message, apply, connect, follow, subscribe, buy, or delete.
+
+That's enforced in three places, not just asked for in the prompt:
+
+1. `evaluate` (arbitrary JavaScript), `upload_file` and `send_keys` are removed from
+   the agent's toolbelt entirely.
+2. `allowedDomains` fences navigation at the browser level.
+3. Every `click` and `input` passes through a guard that reads the target element's
+   label and refuses anything that looks like it sends or publishes — Send, Post,
+   Connect, Submit, Buy, Delete, Share, Subscribe, a comment box, a message
+   composer. It fails closed: an element it can't find or can't read a label for is
+   refused too. Refusals are counted in the panel header and logged.
+
+Point 3 is defence in depth, **not a sandbox**. It classifies a control by the text
+it shows, so an unlabelled or deliberately mislabelled button could still get
+through. It exists because a page the agent reads can try to talk it out of following
+the prompt, and a prompt is a poor place to keep a safety rule. Cookie banners,
+"Apply filters", "Save search" and pagination are deliberately *not* blocked — a
+guard that ends every run on the first consent dialog is a guard people turn off.
+
+A refusal isn't fatal: the agent is told why and picks another route.
 
 That's the default for good reasons: a read-and-draft run is one you can let loose on a
 schedule without watching it, and most sites' terms of service take a dim view of bots

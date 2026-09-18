@@ -17,7 +17,24 @@ struct Draft: Identifiable, Codable, Hashable {
         case targetURL = "target_url"
     }
 
-    var url: URL? { URL(string: targetURL) }
+    var url: URL? { WebLink.parse(targetURL) }
+}
+
+/// Every URL in a report comes from the model, which read it off a page — so it's
+/// attacker-influenceable text, and it ends up at `NSWorkspace.open`. `URL(string:)`
+/// happily builds `file:///…`, `smb://…` or any custom scheme, which would turn a
+/// prompt injection on a visited page into "Claudette opened a local resource".
+///
+/// Parsing goes through here so there's one place that decides, and a new call site
+/// can't quietly skip the check.
+enum WebLink {
+    static func parse(_ raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let url = URL(string: trimmed) else { return nil }
+        guard let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http" else { return nil }
+        guard let host = url.host, !host.isEmpty else { return nil }
+        return url
+    }
 }
 
 /// One result. A person, a page, a product, a post — whatever the goal was about.
@@ -64,7 +81,7 @@ struct Finding: Identifiable, Codable, Hashable {
         }
     }
 
-    var link: URL? { URL(string: url) }
+    var link: URL? { WebLink.parse(url) }
 }
 
 /// The result of one browser task — the sidecar's structured output.

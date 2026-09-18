@@ -32,7 +32,11 @@ struct ContentView: View {
         // Owned here rather than by ChatView so ⇧⌘B and /browse still work when
         // no project is selected.
         .sheet(isPresented: $showingBrowserTask) {
-            BrowserTaskPanel(runner: browserRunner, pendingRecipeDescription: pendingRecipeDescription)
+            BrowserTaskPanel(
+                runner: browserRunner,
+                pendingRecipeDescription: pendingRecipeDescription,
+                canSendToChat: store.selectedProject != nil
+            )
         }
         .onReceive(NotificationCenter.default.publisher(for: .claudetteShowBrowserTask)) { note in
             if let goal = note.userInfo?["goal"] as? String, !goal.isEmpty {
