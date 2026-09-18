@@ -51,6 +51,7 @@ struct SettingsView: View {
     @State private var draftModelId: String = ""
     @State private var revealKey: Bool = false
     @State private var revealBrowserKey: Bool = false
+    @State private var signInURL: String = ""
     @State private var testState: TestState = .idle
     /// Local synthesiser used purely to preview an Apple voice from the picker.
     /// Kept separate from the app-wide SpeechOutput so a preview doesn't disturb
@@ -200,7 +201,7 @@ struct SettingsView: View {
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
             }
 
-            fieldRow(label: "Browser profile", help: "The agent reuses whatever you're signed into in this profile. Sign in there once, by hand — Claudette never sees your passwords.") {
+            fieldRow(label: "Browser profile", help: "The agent reuses whatever you're signed into in this profile. Claudette never sees your passwords.") {
                 HStack(spacing: 8) {
                     TextField(BrowserAgentConfig.defaultProfileDir, text: $browser.profileDir)
                         .textFieldStyle(.plain)
@@ -213,6 +214,8 @@ struct SettingsView: View {
                         .font(Theme.Font.micro)
                 }
             }
+
+            signInRow
 
             fieldRow(label: "Python", help: "Blank means Claudette finds one with browser-use installed. Point it at a specific interpreter to override.") {
                 TextField("auto", text: $browser.pythonPath)
@@ -347,6 +350,70 @@ struct SettingsView: View {
         f.dateFormat = "EEE HH:mm"
         return f
     }()
+
+    /// Opens the shared profile in a visible browser and holds it there.
+    ///
+    /// A fresh profile is signed out, and a task run refuses to sign in and stops
+    /// at the first login wall — then closes the browser. Without this there's no
+    /// moment at which anyone can actually sign in to anything.
+    @ViewBuilder
+    private var signInRow: some View {
+        fieldRow(
+            label: "Sign in to a site",
+            help: "Opens a browser on the profile above and leaves it open. Sign in by hand, then close it here — the session persists, so task runs start signed in."
+        ) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    TextField("https://example.com", text: $signInURL)
+                        .textFieldStyle(.plain)
+                        .font(Theme.Font.monoSmall)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
+                        .disabled(browserRunner.signIn.isActive)
+
+                    switch browserRunner.signIn {
+                    case .closed, .failed:
+                        Button("Open browser") {
+                            browserRunner.startSignIn(url: signInURL, config: browser)
+                        }
+                        .font(Theme.Font.micro)
+                        .disabled(!browserRunner.environment.isReady || browserRunner.state.isBusy)
+                    case .opening:
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small).scaleEffect(0.7)
+                            Text("Opening…")
+                                .font(Theme.Font.micro)
+                                .foregroundStyle(Theme.Palette.textTertiary)
+                        }
+                    case .open:
+                        Button("Done — close it") { browserRunner.finishSignIn() }
+                            .font(Theme.Font.micro)
+                            .buttonStyle(.borderedProminent)
+                    }
+                }
+
+                switch browserRunner.signIn {
+                case .open:
+                    Text("Browser is open. Sign in, then come back and close it.")
+                        .font(Theme.Font.micro)
+                        .foregroundStyle(Theme.Palette.accent)
+                case .failed(let message):
+                    Text(message)
+                        .font(Theme.Font.micro)
+                        .foregroundStyle(DiffLine.removedRed)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .closed, .opening:
+                    if browserRunner.state.isBusy {
+                        Text("A task is running — stop it first.")
+                            .font(Theme.Font.micro)
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                    }
+                }
+            }
+        }
+    }
 
     /// Whether browser-use is actually installed anywhere Claudette can reach,
     /// with a one-click fix when it isn't.

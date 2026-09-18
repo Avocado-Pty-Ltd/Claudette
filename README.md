@@ -174,8 +174,9 @@ rules live in your file and not in Claudette.
 
 Setup is three things in **Settings → Browser agent**: install browser-use (one click —
 Claudette builds its own virtualenv), add an API key for the model that drives the
-browser, and sign in to whatever sites you need, once, in the browser profile it
-manages. Claudette never sees those passwords.
+browser, and sign in to whatever sites you need, once, via **Sign in to a site** — it opens a
+real browser on the profile the agent uses and waits while you do it. Claudette never
+sees those passwords, and a task run will never sign in on your behalf.
 
 Full guide: [docs/browser-tasks.md](docs/browser-tasks.md).
 

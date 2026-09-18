@@ -585,6 +585,62 @@ async def run(args: argparse.Namespace, spec: TaskSpec) -> int:
     return 0
 
 
+async def run_sign_in(args: argparse.Namespace) -> int:
+    """Open the browser on the shared profile and hold it there.
+
+    Needed because a fresh profile is, by definition, signed out — and a normal
+    run refuses to sign in and stops the moment it meets a login wall, then
+    closes the browser. Without this there is no moment at which the user can
+    actually sign in, which made the documented setup impossible to follow.
+
+    No agent and no model here: the browser opens, the person drives it, and
+    Claudette holds the process open until they say they're done.
+    """
+    try:
+        from browser_use import BrowserProfile, BrowserSession
+    except ImportError as exc:
+        fail(
+            f"browser-use is not installed in this Python environment ({sys.executable}): {exc}.",
+            kind="missing_dependency",
+        )
+
+    profile_kwargs: dict[str, Any] = {
+        # Always visible: the whole point is for a person to use it.
+        "headless": False,
+        # Survive the agent's own teardown until we're terminated.
+        "keep_alive": True,
+    }
+    if args.user_data_dir:
+        profile_kwargs["user_data_dir"] = os.path.expanduser(args.user_data_dir)
+    if args.chrome_path:
+        profile_kwargs["executable_path"] = os.path.expanduser(args.chrome_path)
+    # Deliberately no allowed_domains: the user is driving, and a sign-in often
+    # bounces through an identity provider on another domain.
+
+    session = BrowserSession(browser_profile=BrowserProfile(**profile_kwargs))
+    emit({"type": "status", "message": "Opening the browser…"})
+    try:
+        await session.start()
+        target = (args.sign_in or "").strip()
+        if target:
+            await session.navigate_to(target)
+        emit({"type": "signin_ready", "url": target})
+        # Hold here until Claudette terminates us.
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        emit({"type": "status", "message": "Closing the browser…"})
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        emit({"type": "error", "message": f"{type(exc).__name__}: {exc}", "kind": "signin"})
+        return 1
+    finally:
+        try:
+            await session.kill()
+        except Exception:
+            pass
+    return 0
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Claudette's browser-task sidecar. The task spec arrives as JSON on stdin."
@@ -596,19 +652,33 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--no-vision", action="store_true", help="Skip screenshots — cheaper, less reliable.")
     p.add_argument("--user-data-dir", default=None, help="Browser profile holding the user's sign-ins.")
     p.add_argument("--chrome-path", default=None, help="Chrome/Chromium binary to drive.")
+    p.add_argument(
+        "--sign-in",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="URL",
+        help="Open the browser on the shared profile and hold it open so the user can sign in. "
+        "Reads no task spec and runs no agent.",
+    )
     return p.parse_args(argv)
 
 
 def main() -> None:
     args = parse_args(sys.argv[1:])
-    try:
-        spec = read_spec()
-    except SidecarExit as exc:
-        sys.exit(exc.code)
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    task = loop.create_task(run(args, spec))
+
+    if args.sign_in is not None:
+        # Sign-in mode reads no spec — there's no task, just a browser to hold open.
+        task = loop.create_task(run_sign_in(args))
+    else:
+        try:
+            spec = read_spec()
+        except SidecarExit as exc:
+            sys.exit(exc.code)
+        task = loop.create_task(run(args, spec))
 
     def cancel(*_: Any) -> None:
         task.cancel()

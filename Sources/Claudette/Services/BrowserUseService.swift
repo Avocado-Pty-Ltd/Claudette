@@ -137,8 +137,21 @@ final class BrowserTaskRunner: ObservableObject {
     @Published private(set) var draftLimits: [String: Int] = [:]
     /// How many actions the read-only guard refused this run.
     @Published private(set) var blockedActions: Int = 0
+    /// A browser is open purely so the user can sign in to something. Separate
+    /// from `state`: it runs no agent and produces no report.
+    @Published private(set) var signIn: SignInState = .closed
+
+    enum SignInState: Equatable {
+        case closed
+        case opening
+        case open
+        case failed(String)
+
+        var isActive: Bool { self == .opening || self == .open }
+    }
 
     private var process: Process?
+    private var signInProcess: Process?
     private var stdoutBuffer = Data()
     /// Set when the user hits Stop, so the termination handler reports a
     /// cancellation rather than a crash.
@@ -324,6 +337,113 @@ final class BrowserTaskRunner: ObservableObject {
         lastError = nil
         statusLine = ""
         log = ""
+    }
+
+    // MARK: - Signing in
+
+    /// Open the browser on the shared profile and leave it open.
+    ///
+    /// A fresh profile is signed out, and a normal run refuses to sign in and
+    /// stops at the first login wall — then closes the browser. Without this
+    /// there's no moment at which the user can actually sign in to anything.
+    func startSignIn(url: String, config: BrowserAgentConfig) {
+        guard !signIn.isActive, !state.isBusy else { return }
+        guard let sidecar = Self.sidecarURL() else {
+            signIn = .failed("Couldn't find the browser-agent sidecar inside the app bundle.")
+            return
+        }
+        signIn = .opening
+
+        let profileDir = config.profileDir.trimmingCharacters(in: .whitespaces)
+        let chromePath = config.chromePath.trimmingCharacters(in: .whitespaces)
+        let target = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let preferred = config.pythonPath
+
+        Task { [weak self] in
+            let resolved = await Self.resolveEnvironment(preferred: preferred)
+            guard let self else { return }
+            self.environment = resolved
+            guard self.signIn == .opening else { return }
+            guard case .ready(let interpreter, _) = resolved else {
+                self.signIn = .failed(resolved.advice)
+                return
+            }
+
+            var args = [sidecar.path, "--sign-in"]
+            if !target.isEmpty { args.append(target) }
+            if !profileDir.isEmpty { args += ["--user-data-dir", profileDir] }
+            if !chromePath.isEmpty { args += ["--chrome-path", chromePath] }
+
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: interpreter)
+            task.arguments = args
+            var env = ProcessInfo.processInfo.environment
+            env["PYTHONUNBUFFERED"] = "1"
+            task.environment = env
+
+            let stdout = Pipe()
+            let stderr = Pipe()
+            task.standardOutput = stdout
+            task.standardError = stderr
+            task.standardInput = FileHandle.nullDevice
+
+            stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
+                let data = handle.availableData
+                guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+                Task { @MainActor in self?.handleSignInOutput(text) }
+            }
+            stderr.fileHandleForReading.readabilityHandler = { [weak self] handle in
+                let data = handle.availableData
+                guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+                Task { @MainActor in self?.appendLog(text) }
+            }
+            task.terminationHandler = { [weak self] _ in
+                Task { @MainActor in
+                    self?.signInProcess = nil
+                    if self?.signIn.isActive == true { self?.signIn = .closed }
+                }
+            }
+
+            do {
+                try task.run()
+                self.signInProcess = task
+            } catch {
+                self.signIn = .failed("Couldn't launch \(interpreter): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Close the sign-in browser. Whatever the user signed into persists in the
+    /// profile directory, which is the point.
+    func finishSignIn() {
+        guard let signInProcess, signInProcess.isRunning else {
+            signIn = .closed
+            return
+        }
+        signInProcess.terminate()
+        signIn = .closed
+    }
+
+    private func handleSignInOutput(_ text: String) {
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard
+                let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                let type = obj["type"] as? String
+            else {
+                appendLog(String(line) + "\n")
+                continue
+            }
+            switch type {
+            case "signin_ready":
+                signIn = .open
+            case "error":
+                signIn = .failed(obj["message"] as? String ?? "Couldn't open the browser.")
+            case "status":
+                if let message = obj["message"] as? String { appendLog("sign-in: \(message)\n") }
+            default:
+                break
+            }
+        }
     }
 
     // MARK: - Event stream

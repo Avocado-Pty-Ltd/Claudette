@@ -135,9 +135,18 @@ paywall or rate limit.
 ## Signing in
 
 The agent drives a persistent browser profile at
-`~/Library/Application Support/Claudette/browser-profile`. Run something non-headless
-once and sign in to whatever site you need, by hand, in that window. The session
-persists, so later runs start signed in.
+`~/Library/Application Support/Claudette/browser-profile`.
+
+A task run will never sign in for you — it refuses to enter credentials and stops at
+the first login wall. So sign in yourself, once, ahead of time:
+
+**Settings → Browser agent → Sign in to a site** — type a URL, press **Open browser**.
+A real browser window opens on that profile and stays open. Sign in by hand, then come
+back and press **Done — close it**. The session persists in the profile, so task runs
+start signed in.
+
+(This exists because the profile starts empty. A run that meets a login wall stops and
+closes the browser, which would leave you no moment in which to sign in.)
 
 Claudette never sees, asks for, or stores a site password. If a run finds itself signed
 out it stops and says so in `blocked_reason` rather than trying to sign in.
@@ -217,7 +226,12 @@ main window. It's what reads pages and writes drafts.
 Keys live in your Keychain and reach the sidecar over the environment, never on the
 command line where `ps` would show them.
 
-### 3. Optional: say who you are
+### 3. Sign in to whatever the task needs
+
+**Settings → Browser agent → Sign in to a site**, as above. Skip it for tasks on sites
+that don't need an account.
+
+### 4. Optional: say who you are
 
 **About you** is two or three lines about what you do; **Tone** is a phrase like
 "direct, a bit dry, no exclamation marks". Both feed any drafts' voice, which is the
@@ -268,7 +282,7 @@ by every process on the machine.
 | --- | --- |
 | "browser-use isn't installed in…" | The interpreter Claudette found doesn't have the package. Install from Settings, or point **Python** at one that does. |
 | "Claudette needs Python 3.11 or newer" | macOS ships 3.9. `brew install uv` or `brew install python@3.12`. |
-| Run stops with `not signed in` | The browser profile's session expired. Run once non-headless and sign in. |
+| Run stops with `not signed in` | The profile's session expired or was never created. Settings → Browser agent → **Sign in to a site**. |
 | Run stops with a rate-limit note | The site is throttling. Wait it out; the agent won't try to work around it. |
 | Scheduled run never happened | Is the master switch on? Was Claudette open at the time? Does the recipe have a `goal` in the file? The panel shows warnings for a recipe it can't schedule. |
 | Empty report | Usually too broad a goal. Narrow it, or raise the step budget. |

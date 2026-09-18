@@ -17,6 +17,9 @@ struct BrowserTaskPanel: View {
     /// Editable copy of the runner's report. Cards bind straight into this, so a
     /// tweak to a draft survives scrolling and "Copy all".
     @State private var working = TaskReport()
+    /// The last report taken from the runner, unedited — the yardstick for
+    /// deciding whether an incoming one is genuinely new.
+    @State private var adoptedReport: TaskReport?
     @State private var hasResult = false
     @State private var goal: String = ""
     @State private var recipeId: String = ""
@@ -565,9 +568,14 @@ struct BrowserTaskPanel: View {
 
     /// Take a fresh report from the runner without clobbering edits the user has
     /// already made to the one on screen.
+    ///
+    /// Compared against the last report *adopted*, not against `working` — the
+    /// moment the user edits a draft, `working` diverges from what the runner
+    /// published, so comparing to it would treat every replayed publication as
+    /// new and overwrite exactly the edits this is meant to protect.
     private func adoptReport(_ incoming: TaskReport?) {
-        guard let incoming else { return }
-        guard !hasResult || incoming != working else { return }
+        guard let incoming, incoming != adoptedReport else { return }
+        adoptedReport = incoming
         working = incoming
         hasResult = true
     }
