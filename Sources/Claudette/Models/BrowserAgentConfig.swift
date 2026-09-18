@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import SwiftUI
 
 /// Which model drives the browser agent. Separate from the model Claude Code runs
@@ -151,13 +152,38 @@ final class BrowserAgentConfig: ObservableObject {
     /// site sees every day; it's still a separate *profile* (see profileDir)
     /// because Chrome refuses automation on a profile that's already open.
     nonisolated static var defaultChromePath: String {
-        let candidates = [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+        // Ask Launch Services by bundle id first — that finds the app wherever
+        // it lives (/Applications, ~/Applications, a Homebrew cask path, a
+        // renamed bundle), which a fixed path list can't.
+        let bundleIds = [
+            "com.google.Chrome",
+            "org.chromium.Chromium",
+            "com.brave.Browser",
+            "com.microsoft.edgemac"
         ]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) } ?? ""
+        for id in bundleIds {
+            if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id),
+               let exe = Bundle(url: app)?.executableURL,
+               FileManager.default.isExecutableFile(atPath: exe.path) {
+                return exe.path
+            }
+        }
+        // Fallback for an app that isn't registered with Launch Services yet
+        // (copied in but never opened): probe the usual folders directly.
+        let names = [
+            "Google Chrome.app/Contents/MacOS/Google Chrome",
+            "Chromium.app/Contents/MacOS/Chromium",
+            "Brave Browser.app/Contents/MacOS/Brave Browser",
+            "Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+        ]
+        let folders = ["/Applications", NSHomeDirectory() + "/Applications"]
+        for name in names {
+            for folder in folders {
+                let path = folder + "/" + name
+                if FileManager.default.isExecutableFile(atPath: path) { return path }
+            }
+        }
+        return ""
     }
 
     /// Where the managed virtualenv lives when the user installs browser-use from
