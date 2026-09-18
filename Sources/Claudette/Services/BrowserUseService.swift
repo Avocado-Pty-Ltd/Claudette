@@ -143,6 +143,13 @@ final class BrowserTaskRunner: ObservableObject {
     /// Set when the user hits Stop, so the termination handler reports a
     /// cancellation rather than a crash.
     private var userCancelled = false
+    /// Identifies the current run. The interpreter probe is async and isn't
+    /// cancellable mid-flight, so a probe from a run the user has already
+    /// stopped could otherwise come back while a *new* run is in flight, see
+    /// `state == .running`, and spawn its stale plan — two sidecars driving the
+    /// same browser profile. Every probe carries the token it started with and
+    /// gives up unless it still matches.
+    private var runToken = 0
 
     private static let logLimit = 24_000
 
@@ -180,6 +187,8 @@ final class BrowserTaskRunner: ObservableObject {
         blockedActions = 0
         stdoutBuffer = Data()
         userCancelled = false
+        runToken &+= 1
+        let token = runToken
         state = .running
         statusLine = "Looking for a Python with browser-use…"
 
@@ -203,15 +212,16 @@ final class BrowserTaskRunner: ObservableObject {
         Task { [weak self] in
             let resolved = await Self.resolveEnvironment(preferred: preferred)
             guard let self else { return }
+            // What the probe found is worth keeping whoever asked for it.
             self.environment = resolved
+            // Everything past here belongs to one specific run.
+            guard self.runToken == token, self.state.isBusy else { return }
             guard case .ready(let interpreter, _) = resolved else {
                 self.state = .failed
                 self.statusLine = ""
                 self.lastError = resolved.advice
                 return
             }
-            // The user may have hit Stop while we were probing.
-            guard self.state.isBusy else { return }
             self.spawn(interpreter: interpreter, plan: plan)
         }
     }
@@ -280,6 +290,7 @@ final class BrowserTaskRunner: ObservableObject {
 
     func cancel() {
         userCancelled = true
+        runToken &+= 1
         guard let process, process.isRunning else {
             // Still probing for an interpreter — nothing to signal, just stop.
             if state.isBusy {
@@ -306,6 +317,7 @@ final class BrowserTaskRunner: ObservableObject {
     /// Drop the current result so the panel goes back to the goal field.
     func clear() {
         guard !state.isBusy else { return }
+        runToken &+= 1
         state = .idle
         steps.removeAll()
         report = nil
