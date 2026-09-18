@@ -78,6 +78,7 @@ Sources/Claudette/
 │   ├── ClaudeCLIService.swift   # spawns `claude` with stream-json IO; pairs tool_use↔tool_result
 │   ├── BrowserUseService.swift  # spawns the browser-use sidecar; parses its JSONL events
 │   ├── RecipeStore.swift        # reads the user's own recipe files
+│   ├── RecipeComposer.swift     # /recipe — has Claude write one
 │   └── TaskScheduler.swift      # runs recipes at the times their files ask for
 ├── Resources/
 │   └── browser_agent/
@@ -87,7 +88,8 @@ Sources/Claudette/
     ├── Sidebar/                 # project list + add-project
     ├── Browser/
     │   ├── BrowserTaskPanel.swift  # recipe + goal → live trace → reviewable results
-    │   └── FindingCard.swift       # one result, editable drafts, copy + open
+    │   ├── FindingCard.swift       # one result, editable drafts, copy + open
+    │   └── RecipeComposerSheet.swift # describe it → review the JSON → save
     ├── Chat/
     │   ├── ChatView.swift       # main timeline scroller + activity ticker overlay
     │   ├── TimelineItemView.swift  # dispatcher + UserMessageView + AssistantTextView + ThinkingView + SystemNoticeView
@@ -137,8 +139,18 @@ live in JSON recipe files you write, kept outside the app:
 ```
 
 Keep that folder in a private repo or a synced directory — your rules for your work
-stay yours. **Settings → Browser agent → Recipes → New…** writes a template to start
-from.
+stay yours.
+
+You don't have to write the JSON. `/recipe <what it should do>` (or **⇧⌘R**) has Claude
+write it, and shows you the file before anything is saved:
+
+```
+/recipe watch the pricing pages of three competitors on example.com every Tuesday
+        and Thursday morning and tell me anything that changed
+```
+
+It uses the Claude Code you're already signed into — no extra API key — and edits
+afterwards are just edits to a file you own.
 
 A recipe can also run itself:
 
@@ -171,6 +183,7 @@ Full guide: [docs/browser-tasks.md](docs/browser-tasks.md).
 | ⌘N       | Add project folder        |
 | ⌘T       | Start a new chat          |
 | ⇧⌘B      | Browser task              |
+| ⇧⌘R      | New browser-task recipe   |
 | ⌘⏎ / ⏎   | Send message              |
 | ⇧⏎ / ⌥⏎  | Newline in the input      |
 

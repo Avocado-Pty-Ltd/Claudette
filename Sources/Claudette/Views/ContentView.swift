@@ -9,6 +9,10 @@ struct ContentView: View {
     @State private var showingSettings = false
     @State private var showingOnboarding = false
     @State private var showingBrowserTask = false
+    /// Set by `/recipe <description>`; the panel opens straight into the composer.
+    @State private var pendingRecipeDescription = ""
+
+
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -28,12 +32,17 @@ struct ContentView: View {
         // Owned here rather than by ChatView so ⇧⌘B and /browse still work when
         // no project is selected.
         .sheet(isPresented: $showingBrowserTask) {
-            BrowserTaskPanel(runner: browserRunner)
+            BrowserTaskPanel(runner: browserRunner, pendingRecipeDescription: pendingRecipeDescription)
         }
         .onReceive(NotificationCenter.default.publisher(for: .claudetteShowBrowserTask)) { note in
             if let goal = note.userInfo?["goal"] as? String, !goal.isEmpty {
                 browserRunner.prefill(goal: goal)
             }
+            pendingRecipeDescription = ""
+            showingBrowserTask = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .claudetteComposeRecipe)) { note in
+            pendingRecipeDescription = note.userInfo?["description"] as? String ?? ""
             showingBrowserTask = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .claudetteShowSettings)) { _ in

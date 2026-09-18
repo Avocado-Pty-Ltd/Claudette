@@ -74,6 +74,14 @@ final class RecipeStore: ObservableObject {
     /// URL, or nil if it couldn't be written.
     @discardableResult
     func createTemplate(named rawName: String) -> URL? {
+        write(json: BrowserRecipe.templateJSON(name: rawName), named: rawName, openAfterWriting: true)
+    }
+
+    /// Save a recipe's JSON under a filename derived from its name. Shared by the
+    /// blank template and by `/recipe`, so both land the same way: slugged
+    /// filename, no clobbering, list reloaded.
+    @discardableResult
+    func write(json: String, named rawName: String, openAfterWriting: Bool = false) -> URL? {
         ensureDirectory()
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         let safeName = name.isEmpty ? "new-recipe" : name
@@ -84,6 +92,7 @@ final class RecipeStore: ObservableObject {
             .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
         let base = slug.isEmpty ? "new-recipe" : slug
 
+        // Never overwrite: a recipe the user has edited is their work.
         var url = Self.directory.appendingPathComponent("\(base).json")
         var counter = 2
         while FileManager.default.fileExists(atPath: url.path) {
@@ -92,14 +101,21 @@ final class RecipeStore: ObservableObject {
         }
 
         do {
-            try BrowserRecipe.templateJSON(name: safeName).write(to: url, atomically: true, encoding: .utf8)
+            try json.write(to: url, atomically: true, encoding: .utf8)
         } catch {
             loadErrors = ["Couldn't write \(url.lastPathComponent): \(error.localizedDescription)"]
             return nil
         }
         reload()
-        NSWorkspace.shared.open(url)
+        if openAfterWriting { NSWorkspace.shared.open(url) }
         return url
+    }
+
+    /// Open a recipe file in whatever app owns `.json`.
+    func openInEditor(id: String) {
+        let url = Self.directory.appendingPathComponent("\(id).json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private func ensureDirectory() {

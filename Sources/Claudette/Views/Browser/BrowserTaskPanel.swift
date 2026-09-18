@@ -26,6 +26,12 @@ struct BrowserTaskPanel: View {
     @State private var maxFindings: Int = 8
     @State private var showingLog = false
     @State private var showingOptions = false
+    @State private var showingComposer = false
+    /// Seeds the composer when `/recipe <description>` opened the panel.
+    @State private var composerSeed = ""
+
+    /// Description handed over by `/recipe`, consumed once on appear.
+    var pendingRecipeDescription: String = ""
 
     private var recipe: BrowserRecipe? { recipes.recipe(id: recipeId) }
 
@@ -57,8 +63,18 @@ struct BrowserTaskPanel: View {
         }
         .frame(width: 740, height: 700)
         .background(Theme.Palette.bgPrimary)
+        .sheet(isPresented: $showingComposer) {
+            RecipeComposerSheet(initialDescription: composerSeed) { savedId in
+                composerSeed = ""
+                applyRecipe(id: savedId)
+            }
+        }
         .onAppear {
             recipes.reload()
+            if !pendingRecipeDescription.isEmpty {
+                composerSeed = pendingRecipeDescription
+                showingComposer = true
+            }
             if goal.isEmpty { goal = runner.goal }
             if recipeId.isEmpty { applyRecipe(id: config.lastRecipeId) }
             if runner.environment == .unknown { runner.refreshEnvironment(config: config) }
@@ -232,7 +248,15 @@ struct BrowserTaskPanel: View {
                 .onChange(of: recipeId) { _, newValue in applyRecipe(id: newValue) }
 
                 Menu {
-                    Button("New recipe…") { recipes.createTemplate(named: "New recipe") }
+                    Button("Describe a new recipe…") {
+                        composerSeed = ""
+                        showingComposer = true
+                    }
+                    Button("New blank recipe…") { recipes.createTemplate(named: "New recipe") }
+                    Divider()
+                    if !recipeId.isEmpty {
+                        Button("Edit this recipe") { recipes.openInEditor(id: recipeId) }
+                    }
                     Button("Open recipes folder") { recipes.revealDirectory() }
                     Button("Reload") { recipes.reload() }
                 } label: {

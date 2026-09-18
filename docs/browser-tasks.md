@@ -22,6 +22,31 @@ good result, what to draft, when to run — lives in a JSON file you write:
 That's a normal folder. Keep it in a private repo, a dotfiles checkout, or a synced
 directory; symlink it if you like. Your rules for your work stay yours.
 
+### Having Claude write one
+
+`/recipe <what it should do>` in the chat box, **⇧⌘R**, or **Describe a new recipe…**
+in the panel's ⋯ menu:
+
+```
+/recipe watch the pricing pages of three competitors on example.com every Tuesday
+        and Thursday morning and tell me anything that changed
+```
+
+Claude writes the file and the composer shows it to you before anything is saved —
+a summary (where it starts, what it's fenced to, read-only or not, when it runs) over
+the raw JSON, with warnings for anything worth a second look, like a recipe that can
+interact with pages or a schedule with no goal. **Save** drops it in your recipes
+folder and selects it; **Save & open in editor** also opens the file.
+
+This runs through the Claude Code you're already signed into — a one-shot call in a
+throwaway session, no extra API key, and it doesn't touch your project conversation.
+
+The hard part of a recipe isn't the JSON, it's knowing what to put in `instructions`.
+That's the part worth handing to a model. Edit the file afterwards as much as you like
+— it's yours, and nothing regenerates it.
+
+### Writing one by hand
+
 **Settings → Browser agent → Recipes → New…** writes a commented template and opens it.
 
 ### The format
@@ -211,6 +236,8 @@ BrowserTaskRunner ──spawns──► python runner.py --provider … --max-st
 - `Sources/Claudette/Services/TaskScheduler.swift` — fires scheduled recipes, queues
   them behind each other, files the results.
 - `Sources/Claudette/Services/RecipeStore.swift` — reads your recipe folder.
+- `Sources/Claudette/Services/RecipeComposer.swift` — `/recipe`: asks the `claude` CLI
+  for a recipe and validates what comes back before the sheet offers to save it.
 - `Sources/Claudette/Models/`, `Sources/Claudette/Views/Browser/` — the report, the
   recipe format, the panel and the cards.
 
@@ -227,6 +254,8 @@ by every process on the machine.
 | Run stops with a rate-limit note | The site is throttling. Wait it out; the agent won't try to work around it. |
 | Scheduled run never happened | Is the master switch on? Was Claudette open at the time? Does the recipe have a `goal` in the file? The panel shows warnings for a recipe it can't schedule. |
 | Empty report | Usually too broad a goal. Narrow it, or raise the step budget. |
+| `/recipe` says it can't find `claude` | Recipe writing uses the Claude Code CLI. Install it and run `claude auth`. |
+| `/recipe` returned something odd | Press **Start over** and describe it differently — nothing was saved. |
 
 The **Agent log** disclosure at the bottom of the panel has the sidecar's stderr, which
 is where browser-use's own logging goes.

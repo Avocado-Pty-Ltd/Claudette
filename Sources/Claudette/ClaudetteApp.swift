@@ -60,6 +60,11 @@ struct ClaudetteApp: App {
                     NotificationCenter.default.post(name: .claudetteShowBrowserTask, object: nil)
                 }
                 .keyboardShortcut("b", modifiers: [.command, .shift])
+
+                Button("New Recipe…") {
+                    NotificationCenter.default.post(name: .claudetteComposeRecipe, object: nil)
+                }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
             }
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") {
@@ -91,4 +96,7 @@ extension Notification.Name {
     /// Opens the browser-task panel. `userInfo["goal"]` pre-fills the goal field
     /// — that's how `/browse <goal>` hands off from the chat.
     static let claudetteShowBrowserTask = Notification.Name("claudette.showBrowserTask")
+    /// Opens the browser-task panel straight into the recipe composer.
+    /// `userInfo["description"]` is what `/recipe <description>` was given.
+    static let claudetteComposeRecipe = Notification.Name("claudette.composeRecipe")
 }
