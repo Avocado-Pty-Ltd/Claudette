@@ -111,11 +111,35 @@ final class RecipeStore: ObservableObject {
         return url
     }
 
+    /// The file backing a recipe, or nil if it's gone from disk.
+    func fileURL(id: String) -> URL? {
+        let url = Self.directory.appendingPathComponent("\(id).json")
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
     /// Open a recipe file in whatever app owns `.json`.
     func openInEditor(id: String) {
-        let url = Self.directory.appendingPathComponent("\(id).json")
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard let url = fileURL(id: id) else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    /// Select the recipe file in Finder.
+    func reveal(id: String) {
+        guard let url = fileURL(id: id) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    /// Move a recipe to the Trash — recoverable, never a hard delete: it's the
+    /// user's file and one mis-click shouldn't cost them their rules.
+    func moveToTrash(id: String) {
+        guard let url = fileURL(id: id) else { return }
+        do {
+            try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+        } catch {
+            loadErrors = ["Couldn't move \(url.lastPathComponent) to the Trash: \(error.localizedDescription)"]
+            return
+        }
+        reload()
     }
 
     private func ensureDirectory() {
