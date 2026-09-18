@@ -15,7 +15,7 @@ Claude Code is powerful but its CLI is a wall of text. Claudette turns each run 
 - **A narrator strip** at the bottom of the chat tells you what Claude is doing *right now* — "Reading src/foo.ts", "Editing package.json", "Running: npm test" — so you never lose the thread while responses stream.
 - **Prose is prose.** Assistant text renders as serif Markdown with proper spacing, code fences, lists, quotes and inline code.
 - **The whole app breathes** — spring transitions on new cards, gentle pulses on running actions, no jitter, no cognitive tax.
-- **It can go out and look things up.** Claudette drives [browser-use](https://github.com/browser-use/browser-use) through LinkedIn in your own browser and comes back with people worth connecting with and posts worth replying to — each with a draft. See [LinkedIn prospecting](#linkedin-prospecting).
+- **It can go out and look things up.** Claudette drives [browser-use](https://github.com/browser-use/browser-use) through a site in your own browser and comes back with what it found — on demand, or on a schedule you set. See [Browser tasks](#browser-tasks).
 
 ## Install
 
@@ -76,16 +76,18 @@ Sources/Claudette/
 ├── Services/
 │   ├── ProjectStore.swift       # persists to ~/Library/Application Support/Claudette
 │   ├── ClaudeCLIService.swift   # spawns `claude` with stream-json IO; pairs tool_use↔tool_result
-│   └── BrowserUseService.swift  # spawns the browser-use sidecar; parses its JSONL events
+│   ├── BrowserUseService.swift  # spawns the browser-use sidecar; parses its JSONL events
+│   ├── RecipeStore.swift        # reads the user's own recipe files
+│   └── TaskScheduler.swift      # runs recipes at the times their files ask for
 ├── Resources/
-│   └── linkedin_prospector/
-│       └── prospector.py        # browser-use agent: reads LinkedIn, drafts, never sends
+│   └── browser_agent/
+│       └── runner.py            # browser-use agent; knows nothing about any site
 └── Views/
     ├── ContentView.swift        # NavigationSplitView + SessionHolder
     ├── Sidebar/                 # project list + add-project
-    ├── Prospect/
-    │   ├── ProspectPanel.swift     # goal → live trace → reviewable drafts
-    │   └── ProspectCard.swift      # one contact, editable note, copy + open
+    ├── Browser/
+    │   ├── BrowserTaskPanel.swift  # recipe + goal → live trace → reviewable results
+    │   └── FindingCard.swift       # one result, editable drafts, copy + open
     ├── Chat/
     │   ├── ChatView.swift       # main timeline scroller + activity ticker overlay
     │   ├── TimelineItemView.swift  # dispatcher + UserMessageView + AssistantTextView + ThinkingView + SystemNoticeView
@@ -118,31 +120,49 @@ with `cwd` set to the selected project folder. JSON events are parsed on the mai
 - `stream_event` (partial) → appends text deltas to the current streaming assistant item
 - `result` → finalizes streaming, clears active action
 
-## LinkedIn prospecting
+## Browser tasks
 
-Press **⇧⌘L** (or type `/linkedin <goal>` in the chat box), describe what you're trying
-to do, and Claudette drives [browser-use](https://github.com/browser-use/browser-use)
-through LinkedIn in your own logged-in browser:
+Press **⇧⌘B** (or type `/browse <goal>` in the chat box) and Claudette drives
+[browser-use](https://github.com/browser-use/browser-use) through a site in your own
+browser, then reports back: a card per result, why it matched, and any text you asked
+it to draft — editable, with **Copy** and a link out to the page.
+
+**Claudette ships no site-specific rules, and none belong in this repo.** The app knows
+how to drive a browser and nothing about any particular website. Where to start, which
+domains to stay on, what counts as a good result, what to draft and when to run all
+live in JSON recipe files you write, kept outside the app:
 
 ```
-/linkedin find Sydney-based founders of seed-stage AI infra startups,
-          and posts of theirs worth replying to
+~/Library/Application Support/Claudette/browser-recipes/*.json
 ```
 
-You get back a card per person — who they are, why it picked them, and an editable
-connection note — plus drafted comments for the posts worth engaging on. **Copy**,
-**Open profile**, paste, send.
+Keep that folder in a private repo or a synced directory — your rules for your work
+stay yours. **Settings → Browser agent → Recipes → New…** writes a template to start
+from.
 
-**Claudette drafts; you send.** It never clicks Connect and never posts a comment.
-LinkedIn's User Agreement prohibits automated invitations and posts, and a note nobody
-read isn't worth sending anyway — the value is in the research, not the clicking.
+A recipe can also run itself:
 
-Setup is three things, all in **Settings → LinkedIn**: install browser-use (one click —
+```json
+"schedule": { "days": ["tuesday", "thursday"], "at": "morning" }
+```
+
+Claudette is a desktop app, not a daemon: schedules fire while it's open, a missed slot
+is skipped unless the recipe sets `catchUpIfMissed`, and nothing runs by itself until
+you turn on the master switch in Settings. Each scheduled run writes its results to
+`browser-runs/` and posts a notification.
+
+Runs are **read-only by default**: the agent can search, filter and read, but can't
+submit a form, post, send, or buy — which is what makes it safe to leave on a schedule.
+Turn that off per-run for a task that genuinely needs to click through something. Check
+the terms of any site you point it at; that call is yours, which is exactly why the
+rules live in your file and not in Claudette.
+
+Setup is three things in **Settings → Browser agent**: install browser-use (one click —
 Claudette builds its own virtualenv), add an API key for the model that drives the
-browser, and sign in to LinkedIn once in the Chrome profile it manages. Claudette never
-sees your LinkedIn password.
+browser, and sign in to whatever sites you need, once, in the browser profile it
+manages. Claudette never sees those passwords.
 
-Full guide: [docs/linkedin-prospecting.md](docs/linkedin-prospecting.md).
+Full guide: [docs/browser-tasks.md](docs/browser-tasks.md).
 
 ## Keyboard shortcuts
 
@@ -150,7 +170,7 @@ Full guide: [docs/linkedin-prospecting.md](docs/linkedin-prospecting.md).
 | -------- | ------------------------- |
 | ⌘N       | Add project folder        |
 | ⌘T       | Start a new chat          |
-| ⇧⌘L      | LinkedIn prospecting      |
+| ⇧⌘B      | Browser task              |
 | ⌘⏎ / ⏎   | Send message              |
 | ⇧⏎ / ⌥⏎  | Newline in the input      |
 
@@ -162,7 +182,14 @@ Projects and their last session IDs live at:
 ~/Library/Application Support/Claudette/projects.json
 ```
 
-Delete it to reset the app. LinkedIn prospecting adds two more directories under the
-same folder — `browser-use-venv/` (the managed Python environment) and
-`linkedin-profile/` (the Chrome profile holding your LinkedIn session). API keys live
-in the Keychain, not on disk.
+Delete it to reset the app. Browser tasks add four more directories under the same
+folder:
+
+| Path | Holds |
+| --- | --- |
+| `browser-use-venv/` | The managed Python environment |
+| `browser-profile/` | The browser profile with your site sign-ins |
+| `browser-recipes/` | Your recipe files — yours to back up or version |
+| `browser-runs/` | Markdown results from scheduled runs |
+
+API keys live in the Keychain, not on disk.

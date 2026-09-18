@@ -42,13 +42,15 @@ extension AVSpeechSynthesisVoiceQuality {
 
 struct SettingsView: View {
     @EnvironmentObject var voice: VoiceConfig
-    @EnvironmentObject var prospect: ProspectConfig
-    @EnvironmentObject var prospectRunner: ProspectRunner
+    @EnvironmentObject var browser: BrowserAgentConfig
+    @EnvironmentObject var browserRunner: BrowserTaskRunner
+    @EnvironmentObject var recipes: RecipeStore
+    @EnvironmentObject var scheduler: TaskScheduler
     @State private var draftKey: String = ""
     @State private var draftVoiceId: String = ""
     @State private var draftModelId: String = ""
     @State private var revealKey: Bool = false
-    @State private var revealProspectKey: Bool = false
+    @State private var revealBrowserKey: Bool = false
     @State private var testState: TestState = .idle
     /// Local synthesiser used purely to preview an Apple voice from the picker.
     /// Kept separate from the app-wide SpeechOutput so a preview doesn't disturb
@@ -71,20 +73,21 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 26) {
                     voiceSection
                     Divider().overlay(Theme.Palette.border)
-                    linkedInSection
+                    browserAgentSection
                 }
                 .padding(24)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             footer
         }
-        .frame(width: 620, height: 620)
+        .frame(width: 640, height: 660)
         .background(Theme.Palette.bgPrimary)
         .onAppear {
             draftKey = voice.apiKey
             draftVoiceId = voice.voiceId
             draftModelId = voice.modelId
-            prospectRunner.refreshEnvironment(config: prospect)
+            browserRunner.refreshEnvironment(config: browser)
+            recipes.reload()
         }
     }
 
@@ -111,20 +114,20 @@ struct SettingsView: View {
         .padding(.vertical, 14)
     }
 
-    // MARK: - LinkedIn prospecting
+    // MARK: - Browser agent
 
-    private var linkedInSection: some View {
+    private var browserAgentSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             sectionHeading(
-                "LinkedIn prospecting",
-                subtitle: "Claudette can drive the open-source browser-use agent through LinkedIn in your own browser, looking for people worth connecting with and posts worth replying to. It reads and drafts — it never clicks Connect and never posts, so nothing goes out that you haven't read."
+                "Browser agent",
+                subtitle: "Claudette can drive the open-source browser-use agent through a website in your own browser and report back what it found. Where it goes and what counts as a good result come from your own recipe files — Claudette ships none, and none live in its repository."
             )
 
             environmentRow
 
-            fieldRow(label: "Model provider", help: prospect.provider.keyHelp) {
-                Picker("", selection: $prospect.provider) {
-                    ForEach(ProspectProvider.allCases) { p in
+            fieldRow(label: "Model provider", help: browser.provider.keyHelp) {
+                Picker("", selection: $browser.provider) {
+                    ForEach(BrowserAgentProvider.allCases) { p in
                         Text(p.label).tag(p)
                     }
                 }
@@ -132,14 +135,14 @@ struct SettingsView: View {
                 .pickerStyle(.menu)
             }
 
-            if prospect.provider.needsKey {
-                fieldRow(label: "\(prospect.provider.label) API key", help: "Stored in your Keychain and handed to the agent over the environment, never on the command line.") {
+            if browser.provider.needsKey {
+                fieldRow(label: "\(browser.provider.label) API key", help: "Stored in your Keychain and handed to the agent over the environment, never on the command line.") {
                     HStack(spacing: 8) {
                         Group {
-                            if revealProspectKey {
-                                TextField("sk-…", text: $prospect.apiKey)
+                            if revealBrowserKey {
+                                TextField("sk-…", text: $browser.apiKey)
                             } else {
-                                SecureField("sk-…", text: $prospect.apiKey)
+                                SecureField("sk-…", text: $browser.apiKey)
                             }
                         }
                         .textFieldStyle(.plain)
@@ -150,9 +153,9 @@ struct SettingsView: View {
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
 
                         Button {
-                            revealProspectKey.toggle()
+                            revealBrowserKey.toggle()
                         } label: {
-                            Image(systemName: revealProspectKey ? "eye.slash" : "eye")
+                            Image(systemName: revealBrowserKey ? "eye.slash" : "eye")
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(Theme.Palette.textSecondary)
                                 .frame(width: 30, height: 30)
@@ -164,8 +167,8 @@ struct SettingsView: View {
                 }
             }
 
-            fieldRow(label: "Model", help: "Leave blank for \(prospect.provider.defaultModel).") {
-                TextField(prospect.provider.defaultModel, text: $prospect.model)
+            fieldRow(label: "Model", help: "Leave blank for \(browser.provider.defaultModel).") {
+                TextField(browser.provider.defaultModel, text: $browser.model)
                     .textFieldStyle(.plain)
                     .font(Theme.Font.mono)
                     .padding(.horizontal, 10)
@@ -174,8 +177,11 @@ struct SettingsView: View {
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
             }
 
-            fieldRow(label: "About you", help: "Two or three lines. The drafts borrow your voice from this, so a connection note sounds like you rather than like a template.") {
-                TextEditor(text: $prospect.aboutMe)
+            recipesRow
+            schedulingRow
+
+            fieldRow(label: "About you", help: "Two or three lines. Anything the agent drafts borrows its voice from this, so it reads like you rather than like a template.") {
+                TextEditor(text: $browser.persona)
                     .font(Theme.Font.body)
                     .scrollContentBackground(.hidden)
                     .frame(height: 64)
@@ -185,7 +191,7 @@ struct SettingsView: View {
             }
 
             fieldRow(label: "Tone", help: "Optional. e.g. \u{201C}direct, a bit dry, no exclamation marks\u{201D}.") {
-                TextField("Optional", text: $prospect.tone)
+                TextField("Optional", text: $browser.tone)
                     .textFieldStyle(.plain)
                     .font(Theme.Font.body)
                     .padding(.horizontal, 10)
@@ -194,22 +200,22 @@ struct SettingsView: View {
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
             }
 
-            fieldRow(label: "Chrome profile", help: "The agent reuses the LinkedIn session in this Chrome profile. Sign in there once, by hand — Claudette never sees your LinkedIn password.") {
+            fieldRow(label: "Browser profile", help: "The agent reuses whatever you're signed into in this profile. Sign in there once, by hand — Claudette never sees your passwords.") {
                 HStack(spacing: 8) {
-                    TextField(ProspectConfig.defaultProfileDir, text: $prospect.profileDir)
+                    TextField(BrowserAgentConfig.defaultProfileDir, text: $browser.profileDir)
                         .textFieldStyle(.plain)
                         .font(Theme.Font.monoSmall)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
                         .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
-                    Button("Reset") { prospect.profileDir = ProspectConfig.defaultProfileDir }
+                    Button("Reset") { browser.profileDir = BrowserAgentConfig.defaultProfileDir }
                         .font(Theme.Font.micro)
                 }
             }
 
             fieldRow(label: "Python", help: "Blank means Claudette finds one with browser-use installed. Point it at a specific interpreter to override.") {
-                TextField("auto", text: $prospect.pythonPath)
+                TextField("auto", text: $browser.pythonPath)
                     .textFieldStyle(.plain)
                     .font(Theme.Font.monoSmall)
                     .padding(.horizontal, 10)
@@ -221,10 +227,10 @@ struct SettingsView: View {
             fieldRow(label: "Step budget", help: "Hard ceiling on agent steps per run — where the time and the token bill stop.") {
                 HStack(spacing: 14) {
                     Slider(value: Binding(
-                        get: { Double(prospect.maxSteps) },
-                        set: { prospect.maxSteps = Int($0) }
+                        get: { Double(browser.maxSteps) },
+                        set: { browser.maxSteps = Int($0) }
                     ), in: 10...200, step: 5)
-                    Text("\(prospect.maxSteps)")
+                    Text("\(browser.maxSteps)")
                         .font(Theme.Font.mono)
                         .foregroundStyle(Theme.Palette.textSecondary)
                         .frame(width: 40, alignment: .trailing)
@@ -233,11 +239,120 @@ struct SettingsView: View {
         }
     }
 
+    /// Where the user's recipes live, and how to get at them.
+    private var recipesRow: some View {
+        fieldRow(
+            label: "Recipes",
+            help: "A recipe is a saved task: where to start, which domains to stay on, your rules, and what to draft. They're plain JSON files you own — keep them in a private repo or a synced folder if you like."
+        ) {
+            HStack(spacing: 10) {
+                Text(recipes.recipes.isEmpty
+                     ? "No recipes yet"
+                     : "\(recipes.recipes.count) recipe\(recipes.recipes.count == 1 ? "" : "s")")
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                Button("New…") { recipes.createTemplate(named: "New recipe") }
+                    .font(Theme.Font.micro)
+                Button("Open folder") { recipes.revealDirectory() }
+                    .font(Theme.Font.micro)
+                Button("Reload") { recipes.reload() }
+                    .font(Theme.Font.micro)
+                Spacer()
+            }
+        }
+    }
+
+    /// Scheduled recipes: the master switch, what's queued, and what happened.
+    @ViewBuilder
+    private var schedulingRow: some View {
+        let scheduled = recipes.recipes.filter(\.isSchedulable)
+        VStack(alignment: .leading, spacing: 10) {
+            Toggle(isOn: $scheduler.isEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Run scheduled recipes")
+                        .font(Theme.Font.body)
+                    Text("A recipe with a \u{201C}schedule\u{201D} in its file runs by itself at those times. Claudette isn't a background service — schedules fire while the app is open, and a recipe can set \u{201C}catchUpIfMissed\u{201D} to run late instead of being skipped.")
+                        .font(Theme.Font.micro)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+
+            if scheduled.isEmpty {
+                Text("No recipe has a schedule yet.")
+                    .font(Theme.Font.micro)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+            } else {
+                ForEach(scheduled) { recipe in
+                    HStack(spacing: 8) {
+                        Image(systemName: recipe.symbolName)
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                            .frame(width: 14)
+                        Text(recipe.name)
+                            .font(Theme.Font.caption)
+                            .foregroundStyle(Theme.Palette.textPrimary)
+                        Text(recipe.schedule?.summary ?? "")
+                            .font(Theme.Font.micro)
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                        Spacer()
+                        if scheduler.activeRecipeId == recipe.id {
+                            Text("running now")
+                                .font(Theme.Font.micro)
+                                .foregroundStyle(Theme.Palette.accent)
+                        } else if scheduler.isEnabled, let next = scheduler.nextRun(for: recipe) {
+                            Text(Self.nextRunFormatter.string(from: next))
+                                .font(Theme.Font.micro)
+                                .foregroundStyle(Theme.Palette.textTertiary)
+                        }
+                    }
+                }
+            }
+
+            if !scheduler.history.isEmpty {
+                Divider().overlay(Theme.Palette.border)
+                Text("RECENT SCHEDULED RUNS")
+                    .font(.system(size: 10, weight: .semibold))
+                    .tracking(0.8)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                ForEach(scheduler.history.prefix(5)) { entry in
+                    HStack(spacing: 8) {
+                        Text(Self.nextRunFormatter.string(from: entry.firedAt))
+                            .font(Theme.Font.monoSmall)
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                        Text(entry.recipeName)
+                            .font(Theme.Font.caption)
+                            .foregroundStyle(Theme.Palette.textPrimary)
+                        Text(entry.outcome)
+                            .font(Theme.Font.micro)
+                            .foregroundStyle(Theme.Palette.textSecondary)
+                            .lineLimit(1)
+                        Spacer()
+                        if let url = entry.fileURL {
+                            Button("Open") { NSWorkspace.shared.open(url) }
+                                .font(Theme.Font.micro)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: Theme.Metric.cornerMd).fill(Theme.Palette.bgSecondary))
+    }
+
+    private static let nextRunFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE HH:mm"
+        return f
+    }()
+
     /// Whether browser-use is actually installed anywhere Claudette can reach,
     /// with a one-click fix when it isn't.
     @ViewBuilder
     private var environmentRow: some View {
-        switch prospectRunner.environment {
+        switch browserRunner.environment {
         case .ready(let interpreter, let version):
             HStack(spacing: 8) {
                 Circle().fill(DiffLine.addedGreen).frame(width: 6, height: 6)
@@ -247,32 +362,32 @@ struct SettingsView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer()
-                Button("Re-check") { prospectRunner.refreshEnvironment(config: prospect) }
+                Button("Re-check") { browserRunner.refreshEnvironment(config: browser) }
                     .font(Theme.Font.micro)
             }
         default:
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     Circle().fill(Theme.Palette.textTertiary).frame(width: 6, height: 6)
-                    Text(prospectRunner.environment.advice)
+                    Text(browserRunner.environment.advice)
                         .font(Theme.Font.caption)
                         .foregroundStyle(Theme.Palette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 HStack(spacing: 8) {
-                    Button(prospectRunner.isInstalling ? "Installing…" : "Install browser-use") {
-                        prospectRunner.installBrowserUse(config: prospect)
+                    Button(browserRunner.isInstalling ? "Installing…" : "Install browser-use") {
+                        browserRunner.installBrowserUse(config: browser)
                     }
-                    .disabled(prospectRunner.isInstalling)
-                    Button("Re-check") { prospectRunner.refreshEnvironment(config: prospect) }
-                        .disabled(prospectRunner.isInstalling)
-                    if prospectRunner.isInstalling {
+                    .disabled(browserRunner.isInstalling)
+                    Button("Re-check") { browserRunner.refreshEnvironment(config: browser) }
+                        .disabled(browserRunner.isInstalling)
+                    if browserRunner.isInstalling {
                         ProgressView().controlSize(.small).scaleEffect(0.7)
                     }
                 }
-                if !prospectRunner.installLog.isEmpty {
+                if !browserRunner.installLog.isEmpty {
                     ScrollView {
-                        Text(prospectRunner.installLog)
+                        Text(browserRunner.installLog)
                             .font(Theme.Font.monoSmall)
                             .foregroundStyle(Theme.Palette.textTertiary)
                             .textSelection(.enabled)

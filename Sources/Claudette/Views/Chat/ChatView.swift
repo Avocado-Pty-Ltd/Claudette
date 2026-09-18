@@ -6,7 +6,7 @@ struct ChatView: View {
     @EnvironmentObject var session: ClaudeChatSession
     @EnvironmentObject var store: ProjectStore
     @EnvironmentObject var voiceConfig: VoiceConfig
-    @EnvironmentObject var prospectRunner: ProspectRunner
+    @EnvironmentObject var browserRunner: BrowserTaskRunner
     @StateObject private var speechInput = SpeechInput()
     @StateObject private var speechOutput: SpeechOutput
     @State private var draft: String = ""
@@ -148,25 +148,25 @@ struct ChatView: View {
         .onDisappear { stopConversation() }
     }
 
-    /// Opens the LinkedIn prospecting panel. Pulses while a run is in flight so
-    /// the user can close the sheet, keep chatting, and still see it working.
-    private var prospectButton: some View {
+    /// Opens the browser-task panel. Tinted while a run is in flight so the user
+    /// can close the sheet, keep chatting, and still see it working.
+    private var browserTaskButton: some View {
         Button {
-            NotificationCenter.default.post(name: .claudetteShowProspects, object: nil)
+            NotificationCenter.default.post(name: .claudetteShowBrowserTask, object: nil)
         } label: {
-            Image(systemName: "person.2.badge.plus")
+            Image(systemName: "globe")
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(prospectRunner.state.isBusy ? Theme.Palette.accent : Theme.Palette.textSecondary)
+                .foregroundStyle(browserRunner.state.isBusy ? Theme.Palette.accent : Theme.Palette.textSecondary)
                 .frame(width: 30, height: 26)
                 .background(
                     RoundedRectangle(cornerRadius: 7)
-                        .fill(prospectRunner.state.isBusy
+                        .fill(browserRunner.state.isBusy
                               ? Theme.Palette.accent.opacity(0.14)
                               : Theme.Palette.bgSecondary)
                 )
         }
         .buttonStyle(.plain)
-        .help("LinkedIn prospecting (⇧⌘L) — find contacts to add and comments to write")
+        .help("Browser task (⇧⌘B) — send the agent to look something up")
     }
 
     /// Conversation-mode button — a single toggle that owns the whole hands-free loop:
@@ -305,7 +305,7 @@ struct ChatView: View {
                 session.setPermissionMode(newMode)
                 store.setPermissionMode(newMode, for: project)
             }
-            prospectButton
+            browserTaskButton
             conversationToggle
             ttsToggle
             Button {

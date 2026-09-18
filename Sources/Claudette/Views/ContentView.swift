@@ -4,11 +4,11 @@ import AppKit
 struct ContentView: View {
     @EnvironmentObject var store: ProjectStore
     @EnvironmentObject var permissions: PermissionsCoordinator
-    @EnvironmentObject var prospectRunner: ProspectRunner
+    @EnvironmentObject var browserRunner: BrowserTaskRunner
     @State private var columnVisibility: NavigationSplitViewVisibility = .doubleColumn
     @State private var showingSettings = false
     @State private var showingOnboarding = false
-    @State private var showingProspects = false
+    @State private var showingBrowserTask = false
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -25,16 +25,16 @@ struct ContentView: View {
         .sheet(isPresented: $showingOnboarding) {
             PermissionsOnboardingView()
         }
-        // Owned here rather than by ChatView so ⇧⌘L and /linkedin still work
-        // when no project is selected.
-        .sheet(isPresented: $showingProspects) {
-            ProspectPanel(runner: prospectRunner)
+        // Owned here rather than by ChatView so ⇧⌘B and /browse still work when
+        // no project is selected.
+        .sheet(isPresented: $showingBrowserTask) {
+            BrowserTaskPanel(runner: browserRunner)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .claudetteShowProspects)) { note in
+        .onReceive(NotificationCenter.default.publisher(for: .claudetteShowBrowserTask)) { note in
             if let goal = note.userInfo?["goal"] as? String, !goal.isEmpty {
-                prospectRunner.prefill(goal: goal)
+                browserRunner.prefill(goal: goal)
             }
-            showingProspects = true
+            showingBrowserTask = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .claudetteShowSettings)) { _ in
             showingSettings = true

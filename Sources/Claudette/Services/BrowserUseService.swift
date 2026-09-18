@@ -1,8 +1,8 @@
 import Foundation
 import Combine
 
-/// Where a prospecting run has got to.
-enum ProspectRunState: Equatable {
+/// Where a browser task has got to.
+enum BrowserRunState: Equatable {
     case idle, running, finished, failed, cancelled
 
     var isBusy: Bool { self == .running }
@@ -10,10 +10,10 @@ enum ProspectRunState: Equatable {
 
 /// Whether the machine can actually run the browser-use sidecar.
 ///
-/// Deliberately a top-level type rather than nested inside `ProspectRunner`:
+/// Deliberately a top-level type rather than nested inside `BrowserTaskRunner`:
 /// the probe that produces it runs off the main actor, and a type nested in a
 /// `@MainActor` class inherits that isolation.
-enum ProspectEnvironment: Equatable {
+enum BrowserAgentEnvironment: Equatable {
     /// Not probed yet.
     case unknown
     /// browser-use is importable from `interpreter`.
@@ -24,13 +24,6 @@ enum ProspectEnvironment: Equatable {
     case missingPython(detail: String)
 
     var isReady: Bool { if case .ready = self { return true }; return false }
-
-    var interpreterPath: String? {
-        switch self {
-        case .ready(let path, _): return path
-        default: return nil
-        }
-    }
 
     /// Human-readable next step for whatever the probe found.
     var advice: String {
@@ -60,68 +53,88 @@ private struct PythonProbe: Sendable {
     var versionIsSupported: Bool { major > 3 || (major == 3 && minor >= 11) }
 }
 
-/// Everything the sidecar needs, snapshotted off the config so the launch
-/// can happen after an `await` without reaching back into UI state.
+/// Everything site-specific about a run, handed to the sidecar as JSON on stdin.
+///
+/// Built from the user's recipe plus whatever they typed. Claudette contributes
+/// no rules of its own here — if a field is empty, it's because the user left it
+/// empty.
+struct BrowserTaskSpec: Codable, Sendable {
+    var goal: String
+    var instructions: String = ""
+    var startURL: String = ""
+    var allowedDomains: [String] = []
+    var maxFindings: Int = 8
+    var readOnly: Bool = true
+    var persona: String = ""
+    var tone: String = ""
+    var drafts: [Slot] = []
+
+    struct Slot: Codable, Sendable {
+        var label: String
+        var limit: Int?
+        var guidance: String = ""
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case goal, instructions, drafts, persona, tone
+        case startURL = "start_url"
+        case allowedDomains = "allowed_domains"
+        case maxFindings = "max_findings"
+        case readOnly = "read_only"
+    }
+}
+
+/// Runtime knobs — which model, which browser, how long. Snapshotted off the
+/// config so the launch can happen after an `await` without reaching back into
+/// UI state.
 private struct LaunchPlan: Sendable {
     var sidecar: String
-    var goal: String
-    var mode: String
-    var maxContacts: Int
-    var maxComments: Int
-    var maxSteps: Int
     var provider: String
     var model: String
+    var maxSteps: Int
     var headless: Bool
     var profileDir: String
     var chromePath: String
-    var aboutMe: String
-    var tone: String
     var apiKeyEnvVar: String?
     var apiKey: String
+    var spec: BrowserTaskSpec
 
     var arguments: [String] {
         var args = [
             sidecar,
-            "--goal", goal,
-            "--mode", mode,
-            "--max-contacts", String(maxContacts),
-            "--max-comments", String(maxComments),
-            "--max-steps", String(maxSteps),
             "--provider", provider,
-            "--model", model
+            "--model", model,
+            "--max-steps", String(maxSteps)
         ]
         if headless { args.append("--headless") }
         if !profileDir.isEmpty { args += ["--user-data-dir", profileDir] }
         if !chromePath.isEmpty { args += ["--chrome-path", chromePath] }
-        if !aboutMe.isEmpty { args += ["--about-me", aboutMe] }
-        if !tone.isEmpty { args += ["--tone", tone] }
         return args
     }
 }
 
-/// Drives the bundled `browser-use` sidecar: spawns it, parses its JSONL event
-/// stream, and publishes progress for the prospect panel to render.
-///
-/// The sidecar only ever *reads* LinkedIn and drafts text. Sending connection
-/// requests and posting comments stays with the user, in their own browser —
-/// see `Resources/linkedin_prospector/prospector.py` for why.
+/// Drives the bundled `browser-use` sidecar: spawns it, feeds it a task spec,
+/// parses its JSONL event stream, and publishes progress for the panel to render.
 @MainActor
-final class ProspectRunner: ObservableObject {
-    @Published private(set) var state: ProspectRunState = .idle
+final class BrowserTaskRunner: ObservableObject {
+    @Published private(set) var state: BrowserRunState = .idle
     /// Live trace of what the agent is looking at, oldest first.
-    @Published private(set) var steps: [ProspectStep] = []
-    @Published private(set) var report: ProspectReport?
+    @Published private(set) var steps: [BrowserStep] = []
+    @Published private(set) var report: TaskReport?
     /// One-line "what's happening now" for the panel header.
     @Published private(set) var statusLine: String = ""
     @Published private(set) var lastError: String?
-    /// Raw stderr plus any stdout line that wasn't one of our events, shown
-    /// behind a disclosure triangle. Capped so a chatty run can't grow unbounded.
+    /// Raw stderr plus any stdout line that wasn't one of our events, shown behind
+    /// a disclosure triangle. Capped so a chatty run can't grow unbounded.
     @Published private(set) var log: String = ""
-    @Published private(set) var environment: ProspectEnvironment = .unknown
+    @Published private(set) var environment: BrowserAgentEnvironment = .unknown
     @Published private(set) var installLog: String = ""
     @Published private(set) var isInstalling: Bool = false
     /// Goal text of the run in flight, or the last one.
     @Published private(set) var goal: String = ""
+    /// Draft labels and their character caps, carried from the recipe that
+    /// started the run so the cards can count against them.
+    @Published private(set) var draftLimits: [String: Int] = [:]
 
     private var process: Process?
     private var stdoutBuffer = Data()
@@ -133,22 +146,31 @@ final class ProspectRunner: ObservableObject {
 
     // MARK: - Running
 
-    func run(goal: String, config: ProspectConfig) {
-        let trimmedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
+    func run(spec: BrowserTaskSpec, config: BrowserAgentConfig) {
+        let trimmedGoal = spec.goal.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedGoal.isEmpty, !state.isBusy else { return }
 
         guard let sidecar = Self.sidecarURL() else {
             state = .failed
-            lastError = "Couldn't find the prospecting sidecar inside the app bundle. Rebuild Claudette with ./build.sh."
+            lastError = "Couldn't find the browser-agent sidecar inside the app bundle. Rebuild Claudette with ./build.sh."
             return
         }
         if config.provider.needsKey && config.apiKey.trimmingCharacters(in: .whitespaces).isEmpty {
             state = .failed
-            lastError = "Add a \(config.provider.label) API key in Settings → LinkedIn, or switch to Ollama to run locally without one."
+            lastError = "Add a \(config.provider.label) API key in Settings → Browser agent, or switch to Ollama to run locally without one."
             return
         }
 
-        self.goal = trimmedGoal
+        var resolvedSpec = spec
+        resolvedSpec.goal = trimmedGoal
+        resolvedSpec.persona = config.persona.trimmingCharacters(in: .whitespacesAndNewlines)
+        resolvedSpec.tone = config.tone.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        goal = trimmedGoal
+        draftLimits = Dictionary(
+            resolvedSpec.drafts.compactMap { slot in slot.limit.map { (slot.label, $0) } },
+            uniquingKeysWith: { first, _ in first }
+        )
         steps.removeAll()
         report = nil
         lastError = nil
@@ -158,28 +180,23 @@ final class ProspectRunner: ObservableObject {
         state = .running
         statusLine = "Looking for a Python with browser-use…"
 
-        // Finding the interpreter shells out to every candidate on the machine,
-        // so it happens off the main actor — otherwise the panel freezes for a
-        // second on the way into every run.
-        let preferred = config.pythonPath
-        let launch = LaunchPlan(
+        let plan = LaunchPlan(
             sidecar: sidecar.path,
-            goal: trimmedGoal,
-            mode: config.mode.rawValue,
-            maxContacts: config.maxContacts,
-            maxComments: config.maxComments,
-            maxSteps: config.maxSteps,
             provider: config.provider.rawValue,
             model: config.effectiveModel,
+            maxSteps: config.maxSteps,
             headless: config.headless,
             profileDir: config.profileDir.trimmingCharacters(in: .whitespaces),
             chromePath: config.chromePath.trimmingCharacters(in: .whitespaces),
-            aboutMe: config.aboutMe.trimmingCharacters(in: .whitespacesAndNewlines),
-            tone: config.tone.trimmingCharacters(in: .whitespacesAndNewlines),
             apiKeyEnvVar: config.provider.apiKeyEnvVar,
-            apiKey: config.apiKey.trimmingCharacters(in: .whitespaces)
+            apiKey: config.apiKey.trimmingCharacters(in: .whitespaces),
+            spec: resolvedSpec
         )
 
+        // Finding the interpreter shells out to every candidate on the machine, so
+        // it happens off the main actor — otherwise the panel freezes for a second
+        // on the way into every run.
+        let preferred = config.pythonPath
         Task { [weak self] in
             let resolved = await Self.resolveEnvironment(preferred: preferred)
             guard let self else { return }
@@ -192,12 +209,21 @@ final class ProspectRunner: ObservableObject {
             }
             // The user may have hit Stop while we were probing.
             guard self.state.isBusy else { return }
-            self.spawn(interpreter: interpreter, plan: launch)
+            self.spawn(interpreter: interpreter, plan: plan)
         }
     }
 
     private func spawn(interpreter: String, plan: LaunchPlan) {
         statusLine = "Starting the browser agent…"
+
+        let specData: Data
+        do {
+            specData = try JSONEncoder().encode(plan.spec)
+        } catch {
+            state = .failed
+            lastError = "Couldn't encode the task: \(error.localizedDescription)"
+            return
+        }
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: interpreter)
@@ -205,18 +231,19 @@ final class ProspectRunner: ObservableObject {
 
         var env = ProcessInfo.processInfo.environment
         env["PYTHONUNBUFFERED"] = "1"
-        // The API key travels over the environment, never argv — argv is
-        // readable by every process on the machine through `ps`.
+        // The API key travels over the environment, never argv — argv is readable
+        // by every process on the machine through `ps`.
         if let envVar = plan.apiKeyEnvVar {
             if plan.apiKey.isEmpty { env.removeValue(forKey: envVar) } else { env[envVar] = plan.apiKey }
         }
         task.environment = env
 
+        let stdin = Pipe()
         let stdout = Pipe()
         let stderr = Pipe()
+        task.standardInput = stdin
         task.standardOutput = stdout
         task.standardError = stderr
-        task.standardInput = FileHandle.nullDevice
 
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
@@ -236,6 +263,11 @@ final class ProspectRunner: ObservableObject {
         do {
             try task.run()
             process = task
+            // The spec goes over stdin rather than argv: it carries the user's
+            // own rules, and argv is world-readable via `ps`. EOF tells the
+            // sidecar the spec is complete.
+            try stdin.fileHandleForWriting.write(contentsOf: specData)
+            try stdin.fileHandleForWriting.close()
         } catch {
             state = .failed
             lastError = "Couldn't launch \(interpreter): \(error.localizedDescription)"
@@ -254,14 +286,14 @@ final class ProspectRunner: ObservableObject {
             return
         }
         statusLine = "Stopping…"
-        // SIGTERM. The sidecar traps it, cancels the agent and closes the
-        // browser, so we don't strand a headless Chrome.
+        // SIGTERM. The sidecar traps it, cancels the agent and closes the browser,
+        // so we don't strand a headless Chrome.
         process.terminate()
     }
 
-    /// Seed the goal field without starting a run — how `/linkedin <goal>` hands
-    /// off from the chat. Clears any previous result so the panel opens on the
-    /// new goal rather than on an old report.
+    /// Seed the goal without starting a run — how `/browse <goal>` hands off from
+    /// the chat. Clears any previous result so the panel opens on the new goal
+    /// rather than on an old report.
     func prefill(goal: String) {
         guard !state.isBusy else { return }
         clear()
@@ -313,7 +345,7 @@ final class ProspectRunner: ObservableObject {
             if let message = obj["message"] as? String { statusLine = message }
 
         case "step":
-            let step = ProspectStep(
+            let step = BrowserStep(
                 number: obj["step"] as? Int ?? steps.count + 1,
                 url: obj["url"] as? String ?? "",
                 title: obj["title"] as? String ?? "",
@@ -328,7 +360,7 @@ final class ProspectRunner: ObservableObject {
             guard let payload = obj["report"] else { return }
             do {
                 let json = try JSONSerialization.data(withJSONObject: payload)
-                var decoded = try JSONDecoder().decode(ProspectReport.self, from: json)
+                var decoded = try JSONDecoder().decode(TaskReport.self, from: json)
                 if decoded.goal.isEmpty { decoded.goal = goal }
                 report = decoded
             } catch {
@@ -377,7 +409,7 @@ final class ProspectRunner: ObservableObject {
         if lastError == nil {
             lastError = status == 0
                 ? "The agent exited without returning anything. Check the log below."
-                : "The prospecting agent exited with status \(status). Check the log below."
+                : "The browser agent exited with status \(status). Check the log below."
         }
     }
 
@@ -390,9 +422,9 @@ final class ProspectRunner: ObservableObject {
 
     // MARK: - Environment
 
-    /// Probe (or re-probe) the Python situation. Runs off the main actor —
-    /// it shells out once per candidate interpreter.
-    func refreshEnvironment(config: ProspectConfig) {
+    /// Probe (or re-probe) the Python situation. Runs off the main actor — it
+    /// shells out once per candidate interpreter.
+    func refreshEnvironment(config: BrowserAgentConfig) {
         let preferred = config.pythonPath
         Task { [weak self] in
             let result = await Self.resolveEnvironment(preferred: preferred)
@@ -401,15 +433,15 @@ final class ProspectRunner: ObservableObject {
     }
 
     /// Create a managed virtualenv under Application Support and install
-    /// browser-use into it. Prefers `uv` when it's on the machine — it
-    /// provisions its own Python 3.12, so this works even on a Mac whose only
-    /// Python is the system 3.9 — and falls back to `venv` + `pip`.
-    func installBrowserUse(config: ProspectConfig) {
+    /// browser-use into it. Prefers `uv` when it's on the machine — it provisions
+    /// its own Python 3.12, so this works even on a Mac whose only Python is the
+    /// system 3.9 — and falls back to `venv` + `pip`.
+    func installBrowserUse(config: BrowserAgentConfig) {
         guard !isInstalling else { return }
         isInstalling = true
         installLog = "Setting up a Python environment for browser-use…\n"
 
-        let venv = ProspectConfig.managedVenvDir
+        let venv = BrowserAgentConfig.managedVenvDir
         let managedPython = venv.appendingPathComponent("bin/python").path
 
         Task { [weak self] in
@@ -445,9 +477,9 @@ final class ProspectRunner: ObservableObject {
 
     nonisolated static func sidecarURL() -> URL? {
         if let bundled = Bundle.module.url(
-            forResource: "prospector",
+            forResource: "runner",
             withExtension: "py",
-            subdirectory: "linkedin_prospector"
+            subdirectory: "browser_agent"
         ) {
             return bundled
         }
@@ -456,7 +488,7 @@ final class ProspectRunner: ObservableObject {
         let here = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // Services/
             .deletingLastPathComponent()   // Claudette/
-            .appendingPathComponent("Resources/linkedin_prospector/prospector.py")
+            .appendingPathComponent("Resources/browser_agent/runner.py")
         return FileManager.default.isReadableFile(atPath: here.path) ? here : nil
     }
 
@@ -465,7 +497,7 @@ final class ProspectRunner: ObservableObject {
         var out: [String] = []
         let trimmed = preferred.trimmingCharacters(in: .whitespaces)
         if !trimmed.isEmpty { out.append((trimmed as NSString).expandingTildeInPath) }
-        out.append(ProspectConfig.managedVenvDir.appendingPathComponent("bin/python").path)
+        out.append(BrowserAgentConfig.managedVenvDir.appendingPathComponent("bin/python").path)
         out += [
             "/opt/homebrew/bin/python3.13",
             "/opt/homebrew/bin/python3.12",
@@ -484,7 +516,7 @@ final class ProspectRunner: ObservableObject {
     }
 
     /// Walk the candidates once and classify the machine.
-    nonisolated static func resolveEnvironment(preferred: String) async -> ProspectEnvironment {
+    nonisolated static func resolveEnvironment(preferred: String) async -> BrowserAgentEnvironment {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 var usablePython: String?
@@ -531,8 +563,7 @@ final class ProspectRunner: ObservableObject {
                 var bootstrap: String?
                 for path in candidateInterpreters(preferred: "")
                 where FileManager.default.isExecutableFile(atPath: path) {
-                    let result = probe(interpreter: path)
-                    if result.versionIsSupported { bootstrap = path; break }
+                    if probe(interpreter: path).versionIsSupported { bootstrap = path; break }
                 }
                 guard let bootstrap else {
                     continuation.resume(returning: nil)

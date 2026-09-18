@@ -213,7 +213,7 @@ final class ClaudeChatSession: ObservableObject {
     /// (built-ins + custom `.claude/commands/*.md` files like `/goal`) can
     /// resolve it. Keep in sync with `handleSlashCommand`'s switch below.
     private static let nativeSlashCommands: Set<String> = [
-        "/clear", "/new", "/help", "/resume", "/model", "/mode", "/reveal", "/session", "/linkedin"
+        "/clear", "/new", "/help", "/resume", "/model", "/mode", "/reveal", "/session", "/browse"
     ]
 
     private static func isNativeSlashCommand(_ line: String) -> Bool {
@@ -256,18 +256,18 @@ final class ClaudeChatSession: ObservableObject {
             } else {
                 appendSystem("Unknown mode: \(arg). Options: \(PermissionMode.allCases.map { $0.cliValue }.joined(separator: ", ")).")
             }
-        case "/linkedin":
-            // Hands the goal to the prospecting panel rather than to Claude Code —
+        case "/browse":
+            // Hands the goal to the browser-task panel rather than to Claude Code —
             // the browser-use agent runs outside the CLI session entirely.
             NotificationCenter.default.post(
-                name: .claudetteShowProspects,
+                name: .claudetteShowBrowserTask,
                 object: nil,
                 userInfo: arg.isEmpty ? [:] : ["goal": arg]
             )
             if arg.isEmpty {
-                appendSystem("Opening LinkedIn prospecting. Tip: /linkedin <goal> pre-fills it.")
+                appendSystem("Opening the browser task panel. Tip: /browse <goal> pre-fills it.")
             } else {
-                appendSystem("Prospecting LinkedIn for: \(arg)")
+                appendSystem("Browser task: \(arg)")
             }
         case "/reveal":
             NSWorkspace.shared.activateFileViewerSelecting([project.url])
@@ -394,7 +394,7 @@ final class ClaudeChatSession: ObservableObject {
     /resume [id]   — pick a previous session for this folder.
     /model <name>  — switch model (sonnet, opus, haiku) for the next chat.
     /reveal        — open the project folder in Finder.
-    /linkedin <goal> — find LinkedIn contacts to add and comments to write.
+    /browse <goal> — send the browser agent to look something up.
     /session       — show the current session ID.
     /help          — show this list.
     """

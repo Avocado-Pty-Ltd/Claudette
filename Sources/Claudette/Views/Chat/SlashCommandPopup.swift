@@ -13,7 +13,7 @@ struct SlashCommand: Identifiable, Equatable {
         .init(name: "new", hint: "Same as /clear", acceptsArgs: false, iconName: "square.and.pencil"),
         .init(name: "mode", hint: "Switch permission mode — auto, acceptEdits, plan…", acceptsArgs: true, iconName: "sparkles"),
         .init(name: "model", hint: "Switch model — sonnet, opus, haiku", acceptsArgs: true, iconName: "cpu"),
-        .init(name: "linkedin", hint: "Find LinkedIn contacts to add and comments to write", acceptsArgs: true, iconName: "person.2.badge.plus"),
+        .init(name: "browse", hint: "Send the browser agent to look something up", acceptsArgs: true, iconName: "globe"),
         .init(name: "reveal", hint: "Reveal the project folder in Finder", acceptsArgs: false, iconName: "folder"),
         .init(name: "session", hint: "Show the current session ID", acceptsArgs: false, iconName: "number"),
         .init(name: "help", hint: "List available commands", acceptsArgs: false, iconName: "questionmark.circle")

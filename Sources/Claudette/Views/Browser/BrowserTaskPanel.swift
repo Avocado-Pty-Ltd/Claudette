@@ -1,23 +1,33 @@
 import SwiftUI
 import AppKit
 
-/// The LinkedIn prospecting surface: type a goal, watch the browser agent work,
-/// review what it drafted.
+/// The browser-task surface: pick a recipe (or don't), type a goal, watch the
+/// agent work, review what it found.
 ///
-/// Claudette drafts; the user sends. There is no "send all" button here and
-/// there isn't going to be one — LinkedIn's User Agreement forbids automated
-/// connecting and posting, and a note nobody read isn't worth sending.
-struct ProspectPanel: View {
-    @EnvironmentObject var config: ProspectConfig
-    @ObservedObject var runner: ProspectRunner
+/// Claudette drafts; the user acts. Read-only runs can't submit, post or send —
+/// which is also why a recipe can safely run on a schedule while nobody's
+/// watching.
+struct BrowserTaskPanel: View {
+    @EnvironmentObject var config: BrowserAgentConfig
+    @EnvironmentObject var recipes: RecipeStore
+    @EnvironmentObject var scheduler: TaskScheduler
+    @ObservedObject var runner: BrowserTaskRunner
     @Environment(\.dismiss) private var dismiss
 
-    /// Editable copy of the runner's report. Cards bind straight into this, so
-    /// a tweak to a draft survives scrolling and "Copy all".
-    @State private var working = ProspectReport()
+    /// Editable copy of the runner's report. Cards bind straight into this, so a
+    /// tweak to a draft survives scrolling and "Copy all".
+    @State private var working = TaskReport()
     @State private var hasResult = false
     @State private var goal: String = ""
+    @State private var recipeId: String = ""
+    @State private var startURL: String = ""
+    @State private var allowedDomains: String = ""
+    @State private var readOnly: Bool = true
+    @State private var maxFindings: Int = 8
     @State private var showingLog = false
+    @State private var showingOptions = false
+
+    private var recipe: BrowserRecipe? { recipes.recipe(id: recipeId) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,7 +44,7 @@ struct ProspectPanel: View {
                         traceSection
                     }
                     if let error = runner.lastError, !error.isEmpty {
-                        errorBanner(error)
+                        banner(error, tint: DiffLine.removedRed)
                     }
                     if !runner.log.isEmpty {
                         logSection
@@ -45,10 +55,12 @@ struct ProspectPanel: View {
             }
             footer
         }
-        .frame(width: 720, height: 680)
+        .frame(width: 740, height: 700)
         .background(Theme.Palette.bgPrimary)
         .onAppear {
+            recipes.reload()
             if goal.isEmpty { goal = runner.goal }
+            if recipeId.isEmpty { applyRecipe(id: config.lastRecipeId) }
             if runner.environment == .unknown { runner.refreshEnvironment(config: config) }
             adoptReport(runner.report)
         }
@@ -59,11 +71,11 @@ struct ProspectPanel: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: "person.2.badge.plus")
+            Image(systemName: recipe?.symbolName ?? "globe")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(Theme.Palette.accent)
             VStack(alignment: .leading, spacing: 1) {
-                Text("LinkedIn prospecting")
+                Text(recipe?.name ?? "Browser task")
                     .font(Theme.Font.heading)
                     .foregroundStyle(Theme.Palette.textPrimary)
                 Text(subtitle)
@@ -92,11 +104,13 @@ struct ProspectPanel: View {
     private var subtitle: String {
         if !runner.statusLine.isEmpty { return runner.statusLine }
         if hasResult {
-            let people = working.prospects.count
-            let comments = working.allComments.count
-            return "\(people) contact\(people == 1 ? "" : "s") · \(comments) comment draft\(comments == 1 ? "" : "s")"
+            let results = working.findings.count
+            let drafts = working.draftCount
+            var text = "\(results) result\(results == 1 ? "" : "s")"
+            if drafts > 0 { text += " · \(drafts) draft\(drafts == 1 ? "" : "s")" }
+            return text
         }
-        return "Reads LinkedIn in your browser and drafts. You send."
+        return "Browses in your browser and reports back. You decide what to do."
     }
 
     // MARK: - Setup
@@ -104,9 +118,10 @@ struct ProspectPanel: View {
     private var setupSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             readinessBanner
+            recipeRow
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("WHAT ARE YOU TRYING TO DO?")
+                Text("WHAT SHOULD IT DO?")
                     .font(.system(size: 10, weight: .semibold))
                     .tracking(0.8)
                     .foregroundStyle(Theme.Palette.textSecondary)
@@ -114,77 +129,189 @@ struct ProspectPanel: View {
                     .font(Theme.Font.bodySerif)
                     .scrollContentBackground(.hidden)
                     .padding(10)
-                    .frame(height: 96)
+                    .frame(height: 92)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Theme.Palette.bgElevated))
                     .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.Palette.border, lineWidth: 0.75))
-                Text("Plain English. The more specific the goal, the less the agent wanders.")
+                Text(recipe?.goalPlaceholder.isEmpty == false
+                     ? recipe!.goalPlaceholder
+                     : "Plain English. The more specific the goal, the less the agent wanders.")
                     .font(Theme.Font.micro)
                     .foregroundStyle(Theme.Palette.textTertiary)
             }
 
-            if goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(Self.examples, id: \.self) { example in
-                        Button { goal = example } label: {
-                            Text(example)
-                                .font(Theme.Font.caption)
+            DisclosureGroup(isExpanded: $showingOptions) {
+                VStack(alignment: .leading, spacing: 12) {
+                    labelledField("Start at", placeholder: "https://example.com", text: $startURL)
+                    labelledField("Stay on", placeholder: "*.example.com, example.org", text: $allowedDomains)
+                    Text(allowedDomains.trimmingCharacters(in: .whitespaces).isEmpty
+                         ? "No domain fence: the agent may follow links anywhere. Fine for open research, worth narrowing for anything else."
+                         : "The agent can't navigate outside these.")
+                        .font(Theme.Font.micro)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 22) {
+                        HStack(spacing: 6) {
+                            Text("Results")
+                                .font(Theme.Font.micro)
                                 .foregroundStyle(Theme.Palette.textSecondary)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 7)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgSecondary))
+                            Stepper(value: $maxFindings, in: 1...25) {
+                                Text("\(maxFindings)")
+                                    .font(Theme.Font.mono)
+                                    .foregroundStyle(Theme.Palette.textPrimary)
+                            }
+                            .fixedSize()
                         }
-                        .buttonStyle(.plain)
+                        Toggle("Headless", isOn: $config.headless)
+                            .toggleStyle(.switch)
+                            .font(Theme.Font.caption)
+                            .help("Off means you can watch the browser work — worth leaving off until you trust it.")
+                        Spacer()
                     }
-                }
-            }
 
-            Picker("", selection: $config.mode) {
-                ForEach(ProspectMode.allCases) { mode in
-                    Text(mode.label).tag(mode)
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.segmented)
-
-            HStack(spacing: 22) {
-                stepper("Contacts", value: $config.maxContacts, range: 1...25)
-                if config.mode != .contacts {
-                    stepper("Comments", value: $config.maxComments, range: 1...15)
-                }
-                Spacer()
-                Toggle("Headless", isOn: $config.headless)
+                    Toggle(isOn: $readOnly) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Read and draft only")
+                                .font(Theme.Font.body)
+                            Text("The agent can search, filter and read, but can't submit a form, post, send, or buy. Turn this off only for a task that genuinely needs to click through something.")
+                                .font(Theme.Font.micro)
+                                .foregroundStyle(Theme.Palette.textTertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                     .toggleStyle(.switch)
-                    .font(Theme.Font.caption)
-                    .help("Off means you can watch the browser work — worth leaving off until you trust it.")
+                }
+                .padding(.top, 10)
+            } label: {
+                Text(showingOptions ? "Options" : "Options — \(optionsSummary)")
+                    .font(Theme.Font.micro)
+                    .foregroundStyle(Theme.Palette.textSecondary)
             }
-
-            Text("Claudette opens Chrome with your own LinkedIn session, reads, and comes back with drafts. It never clicks Connect and never posts a comment — those stay yours, and doing them automatically would breach LinkedIn's User Agreement.")
-                .font(Theme.Font.micro)
-                .foregroundStyle(Theme.Palette.textTertiary)
-                .lineSpacing(2)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private static let examples = [
-        "Find Sydney-based founders of seed-stage AI infra startups I could learn from, and posts of theirs worth replying to.",
-        "I'm hiring a senior iOS engineer — find people who've shipped SwiftUI apps and are open to work.",
-        "Find heads of data at Australian insurers talking publicly about LLM adoption."
-    ]
+    private var optionsSummary: String {
+        var parts: [String] = []
+        let domains = allowedDomains.trimmingCharacters(in: .whitespaces)
+        parts.append(domains.isEmpty ? "anywhere" : domains)
+        parts.append(readOnly ? "read-only" : "can interact")
+        parts.append("\(maxFindings) results")
+        return parts.joined(separator: ", ")
+    }
 
-    private func stepper(_ label: String, value: Binding<Int>, range: ClosedRange<Int>) -> some View {
-        HStack(spacing: 6) {
-            Text(label)
-                .font(Theme.Font.micro)
-                .foregroundStyle(Theme.Palette.textSecondary)
-            Stepper(value: value, in: range) {
-                Text("\(value.wrappedValue)")
-                    .font(Theme.Font.mono)
-                    .foregroundStyle(Theme.Palette.textPrimary)
-            }
-            .fixedSize()
+    private func labelledField(_ label: String, placeholder: String, text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label.uppercased())
+                .font(.system(size: 10, weight: .semibold))
+                .tracking(0.8)
+                .foregroundStyle(Theme.Palette.textTertiary)
+            TextField(placeholder, text: text)
+                .textFieldStyle(.plain)
+                .font(Theme.Font.monoSmall)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.Palette.bgElevated))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.Palette.border, lineWidth: 0.75))
         }
+    }
+
+    // MARK: - Recipes
+
+    private var recipeRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Picker("", selection: $recipeId) {
+                    Text("No recipe — free-form").tag("")
+                    ForEach(recipes.recipes) { r in
+                        Text(r.name).tag(r.id)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(maxWidth: 260)
+                .onChange(of: recipeId) { _, newValue in applyRecipe(id: newValue) }
+
+                Menu {
+                    Button("New recipe…") { recipes.createTemplate(named: "New recipe") }
+                    Button("Open recipes folder") { recipes.revealDirectory() }
+                    Button("Reload") { recipes.reload() }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Recipes are your own files — Claudette ships none")
+
+                Spacer()
+            }
+
+            if let schedule = recipe?.schedule, schedule.isActive {
+                scheduleLine(schedule)
+            }
+            ForEach(recipe?.scheduleProblems ?? [], id: \.self) { problem in
+                Text(problem)
+                    .font(Theme.Font.micro)
+                    .foregroundStyle(Color(hex: 0x8A7B4E))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(recipes.loadErrors, id: \.self) { error in
+                Text("Couldn't read \(error)")
+                    .font(Theme.Font.micro)
+                    .foregroundStyle(DiffLine.removedRed)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func scheduleLine(_ schedule: TaskSchedule) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: scheduler.isEnabled ? "clock" : "clock.badge.xmark")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Theme.Palette.textTertiary)
+            Text(schedule.summary)
+                .font(Theme.Font.micro)
+                .foregroundStyle(Theme.Palette.textTertiary)
+            if !scheduler.isEnabled {
+                Text("· scheduling off")
+                    .font(Theme.Font.micro)
+                    .foregroundStyle(Color(hex: 0x8A7B4E))
+                Button("Turn on") { scheduler.isEnabled = true }
+                    .font(Theme.Font.micro)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.Palette.accent)
+            } else if let next = recipe.flatMap({ scheduler.nextRun(for: $0) }) {
+                Text("· next \(Self.relative.localizedString(for: next, relativeTo: Date()))")
+                    .font(Theme.Font.micro)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+            }
+        }
+    }
+
+    private static let relative: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .full
+        return f
+    }()
+
+    /// Pull a recipe's defaults into the editable fields. The user can still
+    /// override any of them for this one run without touching their file.
+    private func applyRecipe(id: String) {
+        recipeId = id
+        config.lastRecipeId = id
+        guard let r = recipes.recipe(id: id) else {
+            startURL = ""
+            allowedDomains = ""
+            readOnly = true
+            maxFindings = 8
+            return
+        }
+        startURL = r.startURL
+        allowedDomains = r.allowedDomains.joined(separator: ", ")
+        readOnly = r.readOnly
+        maxFindings = r.maxFindings
+        if goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { goal = r.goal }
     }
 
     // MARK: - Readiness
@@ -215,12 +342,10 @@ struct ProspectPanel: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 HStack(spacing: 8) {
-                    Button {
+                    Button(runner.isInstalling ? "Installing…" : "Install browser-use") {
                         runner.installBrowserUse(config: config)
-                    } label: {
-                        Label(runner.isInstalling ? "Installing…" : "Install browser-use", systemImage: "arrow.down.circle")
-                            .font(Theme.Font.micro)
                     }
+                    .font(Theme.Font.micro)
                     .disabled(runner.isInstalling)
                     Button("Re-check") { runner.refreshEnvironment(config: config) }
                         .font(Theme.Font.micro)
@@ -252,8 +377,8 @@ struct ProspectPanel: View {
                 .font(.system(size: 10, weight: .semibold))
                 .tracking(0.8)
                 .foregroundStyle(Theme.Palette.textSecondary)
-            // Newest first: during a long run the interesting line is the last one,
-            // and this keeps it at the top without fighting the scroll position.
+            // Newest first: during a long run the interesting line is the last
+            // one, and this keeps it on top without fighting the scroll position.
             ForEach(Array(runner.steps.suffix(12).reversed())) { step in
                 HStack(alignment: .top, spacing: 8) {
                     Text("\(step.number)")
@@ -293,21 +418,11 @@ struct ProspectPanel: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if !working.blockedReason.isEmpty {
-                errorBanner("The run stopped early: \(working.blockedReason)")
+                banner("The run stopped early: \(working.blockedReason)", tint: Color(hex: 0x8A7B4E))
             }
 
-            ForEach($working.prospects) { $prospect in
-                ProspectCard(prospect: $prospect)
-            }
-
-            if !working.standaloneComments.isEmpty {
-                Text("OTHER POSTS WORTH A COMMENT")
-                    .font(.system(size: 10, weight: .semibold))
-                    .tracking(0.8)
-                    .foregroundStyle(Theme.Palette.textSecondary)
-                ForEach($working.standaloneComments) { $comment in
-                    CommentDraftView(comment: $comment)
-                }
+            ForEach($working.findings) { $finding in
+                FindingCard(finding: $finding, draftLimits: runner.draftLimits)
             }
 
             if working.isEmpty {
@@ -318,11 +433,11 @@ struct ProspectPanel: View {
         }
     }
 
-    private func errorBanner(_ message: String) -> some View {
+    private func banner(_ message: String, tint: Color) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 11))
-                .foregroundStyle(DiffLine.removedRed)
+                .foregroundStyle(tint)
             Text(message)
                 .font(Theme.Font.caption)
                 .foregroundStyle(Theme.Palette.textSecondary)
@@ -331,7 +446,7 @@ struct ProspectPanel: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: Theme.Metric.cornerMd).fill(Color(hex: 0xE5484D, alpha: 0.08)))
+        .background(RoundedRectangle(cornerRadius: Theme.Metric.cornerMd).fill(tint.opacity(0.08)))
     }
 
     private var logSection: some View {
@@ -358,13 +473,11 @@ struct ProspectPanel: View {
     private var footer: some View {
         HStack(spacing: 10) {
             if hasResult {
-                Button("New search") {
+                Button("New task") {
                     hasResult = false
                     runner.clear()
                 }
-                Button {
-                    copyAll()
-                } label: { Text("Copy all") }
+                Button("Copy all") { copyAll() }
                 Button {
                     NotificationCenter.default.post(
                         name: .claudetteFillDraft,
@@ -372,8 +485,10 @@ struct ProspectPanel: View {
                         userInfo: ["text": working.markdown()]
                     )
                     dismiss()
-                } label: { Label("Send to chat", systemImage: "arrow.turn.down.left") }
-                .help("Drop the report into the chat box so Claude can rework the drafts with you.")
+                } label: {
+                    Label("Send to chat", systemImage: "arrow.turn.down.left")
+                }
+                .help("Drop the results into the chat box so Claude can work with them.")
             }
             Spacer()
             if runner.state.isBusy {
@@ -381,9 +496,9 @@ struct ProspectPanel: View {
                     .keyboardShortcut(".", modifiers: [.command])
             } else {
                 Button {
-                    runner.run(goal: goal, config: config)
+                    runner.run(spec: buildSpec(), config: config)
                 } label: {
-                    Label("Search LinkedIn", systemImage: "magnifyingglass")
+                    Label("Run", systemImage: "play.fill")
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.return, modifiers: [.command])
@@ -398,9 +513,27 @@ struct ProspectPanel: View {
 
     // MARK: - Plumbing
 
+    private func buildSpec() -> BrowserTaskSpec {
+        let domains = allowedDomains
+            .split(whereSeparator: { $0 == "," || $0 == " " || $0 == "\n" })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return BrowserTaskSpec(
+            goal: goal,
+            instructions: recipe?.instructions ?? "",
+            startURL: startURL.trimmingCharacters(in: .whitespaces),
+            allowedDomains: domains,
+            maxFindings: maxFindings,
+            readOnly: readOnly,
+            drafts: (recipe?.drafts ?? []).map {
+                BrowserTaskSpec.Slot(label: $0.label, limit: $0.limit, guidance: $0.guidance)
+            }
+        )
+    }
+
     /// Take a fresh report from the runner without clobbering edits the user has
     /// already made to the one on screen.
-    private func adoptReport(_ incoming: ProspectReport?) {
+    private func adoptReport(_ incoming: TaskReport?) {
         guard let incoming else { return }
         guard !hasResult || incoming != working else { return }
         working = incoming
